@@ -1,0 +1,325 @@
+package lyra.game {
+  import lyra.Main;
+
+  [BridgeNamespace("combat")]
+  public class Combat {
+    private static const CONSUMABLE_SKILL_INDEX:int = 5;
+
+    private static function isMonsterAttackable(monster:Object):Boolean {
+      if (monster == null || monster.dataLeaf == null) {
+        return false;
+      }
+
+      return monster.dataLeaf.intState > 0 && monster.dataLeaf.intHP > 0;
+    }
+
+    private static function getSkillCooldownRemainingValue(skill:*):int {
+      var game:* = Main.Game;
+
+      var actionCooldown:* = NaN;
+      var now:* = new Date().getTime();
+      var haste:* = 1 - Math.min(Math.max(game.world.myAvatar.dataLeaf.sta.$tha, -1), 0.5);
+      if (skill.OldCD != null) {
+        actionCooldown = Math.round(skill.OldCD * haste);
+      }
+      else {
+        actionCooldown = Math.round(skill.cd * haste);
+      }
+
+      var globalCooldown:* = game.world.GCD - (now - game.world.GCDTS);
+      if (globalCooldown < 0) {
+        globalCooldown = 0;
+      }
+
+      var remaining:* = actionCooldown - (now - skill.ts);
+      if (remaining < 0) {
+        remaining = 0;
+      }
+
+      return Math.max(globalCooldown, remaining);
+    }
+
+    [BridgeExport]
+    public static function hasTarget():Boolean {
+      var game:Object = Main.Game;
+      var target:Object = game.world.myAvatar.target;
+      if (target != null && target.dataLeaf != null) {
+        return target.dataLeaf.intHP > 0;
+      }
+
+      return false;
+    }
+
+    [BridgeExport]
+    [BridgeTsReturnType("FlashTypes.TargetInfo | null")]
+    public static function getTarget():Object {
+      var game:Object = Main.Game;
+      var target:Object = game.world.myAvatar.target;
+      if (target != null) {
+        var dataLeaf:Object = target.dataLeaf;
+        var objData:Object = target.objData;
+
+        if (!dataLeaf || !objData) {
+          return null;
+        }
+
+        if (target.npcType == "monster") {
+          return {
+            type: "monster",
+            hp: dataLeaf.intHP,
+            maxHp: dataLeaf.intHPMax,
+            state: dataLeaf.intState,
+            cell: dataLeaf.strFrame,
+            monsterId: dataLeaf.MonID,
+            monsterMapId: dataLeaf.MonMapID,
+            level: dataLeaf.iLvl,
+            race: objData.sRace,
+            name: objData.strMonName
+          };
+        }
+
+        if (target.npcType == "player") {
+          return {
+            type: "player",
+            hp: dataLeaf.intHP,
+            maxHp: dataLeaf.intHPMax,
+            state: dataLeaf.intState,
+            cell: dataLeaf.strFrame,
+            afk: dataLeaf.afk,
+            entityId: dataLeaf.entID,
+            entityType: dataLeaf.entType,
+            level: dataLeaf.intLevel,
+            mp: dataLeaf.intMP,
+            maxMp: dataLeaf.intMPMax,
+            sp: dataLeaf.intSP,
+            pad: dataLeaf.strPad,
+            username: dataLeaf.strUsername,
+            name: dataLeaf.uoName
+          };
+        }
+      }
+
+      return null;
+    }
+
+    private static function tryUseSkill(game:Object, skill:Object):Boolean {
+      if (!skill.isOK || skill.skillLock)
+        return false;
+
+      var previousActionId:* = skill.actID;
+      var previousTimestamp:* = skill.ts;
+      game.world.testAction(skill);
+      return skill.actID !== previousActionId || skill.ts !== previousTimestamp;
+    }
+
+    [BridgeExport]
+    [BridgeTsReturnType("FlashTypes.ConsumableSkillItem | null")]
+    public static function getConsumableSkillItem():Object {
+      var game:Object = Main.Game;
+      if (!game.world.actions || !game.world.actions.active) {
+        return null;
+      }
+
+      var skill:Object = game.world.actions.active[CONSUMABLE_SKILL_INDEX];
+      if (!skill || skill.ref != "i1" || skill.sArg1 == null) {
+        return null;
+      }
+
+      var itemId:Number = Number(skill.sArg1);
+      if (isNaN(itemId) || itemId <= 0) {
+        return null;
+      }
+
+      return {
+        itemId: itemId,
+        // sArg1 changes before seia finishes loading the usable-item action.
+        ready:
+          !game.world.lockdownPots &&
+          skill.isOK &&
+          !skill.skillLock &&
+          !skill.lock &&
+          getSkillCooldownRemainingValue(skill) <= 0
+      };
+    }
+
+    [BridgeTsParamType("selector: FlashTypes.MonsterSelector | null")]
+    [BridgeExport]
+    public static function useSkill(index:String, selector:Object = null, force:Boolean = false):Boolean {
+      var game:Object = Main.Game;
+      var skill:Object = game.world.actions.active[parseInt(index)];
+      if (!skill) {
+        return false;
+      }
+
+      if (selector != null) {
+        var monster:Object = World.getMonster(selector);
+        if (!isMonsterAttackable(monster)) {
+          return false;
+        }
+
+        game.world.setTarget(monster);
+        if (game.world.myAvatar.target !== monster) {
+          return false;
+        }
+      }
+
+      if (force || skill.tgt == "s" || skill.tgt == "f") {
+        return tryUseSkill(game, skill);
+      }
+
+      if (game.world.myAvatar.target == game.world.myAvatar) {
+        game.world.myAvatar.target = null;
+        return false;
+      }
+
+      if (game.world.myAvatar.target != null && game.world.myAvatar.target.dataLeaf.intHP > 0) {
+        game.world.approachTarget();
+        return tryUseSkill(game, skill);
+      }
+
+      return false;
+    }
+
+    [BridgeExport]
+    public static function getSkillCooldownRemaining(index:int):int {
+      var game:Object = Main.Game;
+      var skill:* = game.world.actions.active[index];
+      if (!skill) {
+        return 0;
+      }
+
+      return getSkillCooldownRemainingValue(skill);
+    }
+
+    [BridgeTsParamType("selector: FlashTypes.MonsterSelector")]
+    [BridgeTsReturnType("FlashTypes.ConsumableCastDispatch | null")]
+    [BridgeExport]
+    public static function castConsumableOnMonster(selector:Object, expectedItemId:int):Object {
+      // Queued requests can outlive the equipped item or target, and testAction
+      // may silently decline; only a new action identity proves dispatch.
+      if (!selector || expectedItemId <= 0) {
+        return null;
+      }
+
+      var game:Object = Main.Game;
+      var world:Object = game ? game.world : null;
+      var player:Object = world ? world.myAvatar : null;
+      if (
+        !world ||
+        !player ||
+        !player.dataLeaf ||
+        !world.actions ||
+        !world.actions.active
+      ) {
+        return null;
+      }
+
+      var playerState:Number = Number(player.dataLeaf.intState);
+      var playerHp:Number = Number(player.dataLeaf.intHP);
+      if (
+        isNaN(playerState) ||
+        playerState <= 0 ||
+        isNaN(playerHp) ||
+        playerHp <= 0
+      ) {
+        return null;
+      }
+
+      var skill:Object = world.actions.active[CONSUMABLE_SKILL_INDEX];
+      if (
+        !skill ||
+        skill.ref != "i1" ||
+        skill.sArg1 == null ||
+        !skill.isOK ||
+        skill.skillLock ||
+        skill.lock ||
+        world.lockdownPots
+      ) {
+        return null;
+      }
+
+      var itemId:Number = Number(skill.sArg1);
+      if (
+        isNaN(itemId) ||
+        itemId <= 0 ||
+        itemId != expectedItemId ||
+        getSkillCooldownRemainingValue(skill) > 0
+      ) {
+        return null;
+      }
+
+      var monster:Object = World.getMonster(selector);
+      if (
+        !isMonsterAttackable(monster) ||
+        monster.npcType != "monster" ||
+        !monster.pMC ||
+        !monster.pMC.visible
+      ) {
+        return null;
+      }
+
+      var monsterMapId:Number = Number(monster.dataLeaf.MonMapID);
+      if (isNaN(monsterMapId) || monsterMapId <= 0) {
+        return null;
+      }
+
+      world.setTarget(monster);
+      if (world.myAvatar.target !== monster) {
+        return null;
+      }
+
+      var previousActionId:* = skill.actID;
+      var previousTimestamp:* = skill.ts;
+      world.testAction(skill);
+      if (
+        !skill.lock ||
+        skill.actID == null ||
+        Number(skill.actID) < 0 ||
+        (skill.actID === previousActionId && skill.ts === previousTimestamp)
+      ) {
+        return null;
+      }
+
+      return {
+        actionId: Number(skill.actID),
+        itemId: itemId,
+        monsterMapId: monsterMapId
+      };
+    }
+
+    [BridgeExport]
+    public static function cancelAutoAttack():void {
+      var game:Object = Main.Game;
+      game.world.cancelAutoAttack();
+    }
+
+    [BridgeExport]
+    public static function cancelTarget():void {
+      // cancelTarget returns after stopping active auto-attack, so another call
+      // is needed to clear the selected target.
+      var game:Object = Main.Game;
+      game.world.cancelTarget();
+      game.world.cancelTarget();
+    }
+
+    [BridgeTsParamType("selector: FlashTypes.MonsterSelector")]
+    [BridgeExport]
+    public static function attackMonster(selector:Object):Boolean {
+      if (!selector)
+        return false;
+
+      var game:Object = Main.Game;
+      var monster:Object = World.getMonster(selector);
+      if (isMonsterAttackable(monster)) {
+        game.world.setTarget(monster);
+        if (game.world.myAvatar.target !== monster)
+          return false;
+
+        game.world.approachTarget();
+        return true;
+      }
+
+      return false;
+    }
+  }
+}
