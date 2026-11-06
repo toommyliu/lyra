@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Lyra supports macOS only.");
 
+mod logging;
 mod net;
 mod player;
 mod player_view;
@@ -9,22 +10,24 @@ use gpui::{
     Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
     WindowOptions, actions, px, size,
 };
-use tracing_subscriber::EnvFilter;
 
 actions!(lyra, [Quit]);
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    let logging = logging::init();
     let data = dirs::data_dir()
         .ok_or_else(|| anyhow::anyhow!("No application data directory"))?
         .join("Lyra");
     std::fs::create_dir_all(&data)?;
     let device = net::device_id(&data.join("device-id"))?;
     gpui_platform::application().run(move |cx| {
+        // AppKit termination does not unwind main's stack.
+        let mut logging = Some(logging);
+        cx.on_app_quit(move |_| {
+            let logging = logging.take();
+            async move { drop(logging) }
+        })
+        .detach();
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.set_menus(vec![Menu {
