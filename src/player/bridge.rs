@@ -1,12 +1,26 @@
+use std::{cell::Cell, rc::Rc};
+
 use ruffle_core::{
     context::UpdateContext,
     external::{ExternalInterfaceProvider, Value},
 };
 
-pub(super) struct Bridge;
+#[derive(Clone, Default)]
+pub(super) struct Bridge {
+    loaded: Rc<Cell<bool>>,
+}
+
+impl Bridge {
+    pub(super) fn loaded(&self) -> bool {
+        self.loaded.get()
+    }
+}
 
 impl ExternalInterfaceProvider for Bridge {
-    fn call_method(&self, _context: &mut UpdateContext<'_>, _name: &str, _args: &[Value]) -> Value {
+    fn call_method(&self, _context: &mut UpdateContext<'_>, name: &str, _args: &[Value]) -> Value {
+        if name == "onLoaded" {
+            self.loaded.set(true);
+        }
         Value::Undefined
     }
 

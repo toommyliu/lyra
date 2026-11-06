@@ -1,4 +1,5 @@
 mod input;
+mod menu;
 mod text_input;
 
 #[path = "macos.rs"]
@@ -36,17 +37,69 @@ impl PlayerView {
         window: &mut Window,
         cx: &mut App,
     ) -> anyhow::Result<Entity<PlayerView>> {
-        let native = NativeView::attach(window)?;
+        let mut native = NativeView::attach(window)?;
         let (failed, failures) = async_channel::bounded(1);
         let (outputs_tx, outputs) = async_channel::unbounded();
-        let session = Player::spawn(native.surface(), data, device, failed, outputs_tx)?;
+        let session = Player::spawn(
+            native.surface(),
+            data,
+            device,
+            failed,
+            outputs_tx,
+            native.supports_display_frames(),
+        )?;
+        let inbox = session.inbox();
+        native.connect_frames(move || inbox.request_frame());
         Ok(cx.new(|cx| {
-            cx.spawn(async move |this, cx| {
-                while let Ok(Output::Cursor(cursor)) = outputs.recv().await {
+            cx.spawn_in(window, async move |this, cx| {
+                while let Ok(output) = outputs.recv().await {
+                    let menu = match output {
+                        Output::Menu(menu) => menu,
+                        Output::FrameClock(enabled) => {
+                            if this
+                                .update(cx, |this: &mut Self, _| {
+                                    this.native.set_frame_clock(enabled)
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        Output::Cursor(cursor) => {
+                            if this
+                                .update(cx, |this: &mut Self, cx| {
+                                    this.cursor = cursor;
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let Ok((view, input_view)) =
+                        this.update(cx, |this: &mut Self, _| this.native.menu_views())
+                    else {
+                        break;
+                    };
+                    // AppKit runs a nested event loop while tracking a menu. Release GPUI's borrow first.
+                    let selection = menu::show(&view, menu);
+                    menu::sync_modifiers(&input_view);
                     if this
-                        .update(cx, |this: &mut Self, cx| {
-                            this.cursor = cursor;
-                            cx.notify();
+                        .update_in(cx, |this, window, _| {
+                            this.session.close_menu(selection);
+                            this.modifiers =
+                                if window.is_window_active() && this.focus.is_focused(window) {
+                                    menu::modifiers()
+                                } else {
+                                    Default::default()
+                                };
+                            for event in input::modifier_keys(Default::default(), this.modifiers) {
+                                this.session.send(event);
+                            }
+                            window.refresh();
                         })
                         .is_err()
                     {
@@ -146,7 +199,9 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
     let down_hitbox = hitbox.clone();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
         if phase == DispatchPhase::Bubble && down_hitbox.is_hovered(window) {
-            window.capture_pointer(down_hitbox.id);
+            if event.button != gpui::MouseButton::Right {
+                window.capture_pointer(down_hitbox.id);
+            }
             down_view.update(cx, |this, cx| {
                 window.focus(&this.focus, cx);
                 this.session.send(ViewEvent::MouseDown {

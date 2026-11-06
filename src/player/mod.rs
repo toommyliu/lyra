@@ -1,12 +1,18 @@
 mod backends;
 mod bridge;
+pub(crate) mod context_menu;
 mod net;
+mod preferences;
 mod surface;
 pub(crate) mod view;
 
 use std::{
     path::PathBuf,
-    sync::mpsc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -17,26 +23,40 @@ use ruffle_core::{
 use ruffle_frontend_utils::backends::storage::DiskStorageBackend;
 
 use backends::{Navigator, Tasks, Ui};
+use context_menu::{ContextMenu, MenuSelection, OpenMenu, PlayerInput};
 pub(crate) use surface::Surface;
 use view::{Effect, ViewEvent};
 
 pub(crate) enum Msg {
     View(ViewEvent),
+    MenuClosed(Option<MenuSelection>),
+    Frame,
     Poll(async_task::Runnable),
     Wake,
     Stop,
 }
 
 pub(crate) enum Output {
+    Menu(ContextMenu),
+    FrameClock(bool),
     Cursor(MouseCursor),
 }
 
 #[derive(Clone)]
-pub(crate) struct Inbox(mpsc::Sender<Msg>);
+pub(crate) struct Inbox {
+    messages: mpsc::Sender<Msg>,
+    frame_pending: Arc<AtomicBool>,
+}
 
 impl Inbox {
     pub(crate) fn post(&self, msg: Msg) {
-        let _ = self.0.send(msg);
+        let _ = self.messages.send(msg);
+    }
+
+    pub(crate) fn request_frame(&self) {
+        if !self.frame_pending.swap(true, Ordering::Relaxed) {
+            self.post(Msg::Frame);
+        }
     }
 }
 
@@ -52,14 +72,19 @@ impl Player {
         device: reqwest::header::HeaderValue,
         failures: async_channel::Sender<String>,
         outputs: async_channel::Sender<Output>,
+        display_frames: bool,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
-        let inbox = Inbox(tx);
+        let inbox = Inbox {
+            messages: tx,
+            frame_pending: Arc::new(AtomicBool::new(false)),
+        };
         let outbox = inbox.clone();
         let thread = thread::Builder::new()
             .name("lyra-player".into())
             .spawn(move || {
-                if let Err(error) = run(surface, data, device, rx, outbox, outputs) {
+                if let Err(error) = run(surface, data, device, rx, outbox, outputs, display_frames)
+                {
                     tracing::error!(%error, "player failed");
                     let _ = failures.try_send(error.to_string());
                 }
@@ -72,6 +97,14 @@ impl Player {
 
     pub(crate) fn send(&self, event: ViewEvent) {
         self.inbox.post(Msg::View(event));
+    }
+
+    pub(crate) fn inbox(&self) -> Inbox {
+        self.inbox.clone()
+    }
+
+    pub(crate) fn close_menu(&self, selection: Option<MenuSelection>) {
+        self.inbox.post(Msg::MenuClosed(selection));
     }
 }
 
@@ -91,6 +124,7 @@ fn run(
     rx: mpsc::Receiver<Msg>,
     inbox: Inbox,
     outputs: async_channel::Sender<Output>,
+    display_frames: bool,
 ) -> anyhow::Result<()> {
     let mut viewport = loop {
         match rx.recv()? {
@@ -111,12 +145,13 @@ fn run(
         None,
         None,
     )?;
+    let bridge = bridge::Bridge::default();
     let player = PlayerBuilder::new()
         .with_boxed_renderer(surface.renderer(viewport)?)
-        .with_navigator(Navigator::new(net, inbox, tasks.clone()))
+        .with_navigator(Navigator::new(net, inbox.clone(), tasks.clone()))
         .with_boxed_audio(backends::audio::audio())
-        .with_external_interface(Box::new(bridge::Bridge))
-        .with_ui(Ui::new(arboard::Clipboard::new()?, outputs))
+        .with_external_interface(Box::new(bridge.clone()))
+        .with_ui(Ui::new(arboard::Clipboard::new()?, outputs.clone()))
         .with_storage(Box::new(DiskStorageBackend::new(
             data.join("shared-objects"),
         )))
@@ -125,10 +160,20 @@ fn run(
         .with_letterbox(Letterbox::On)
         .with_movie(movie)
         .build();
+    let smooth_motion = preferences::BoolPreference::new(data.join("smooth-motion"));
+    match smooth_motion.load() {
+        Ok(enabled) => player.lock().unwrap().set_frame_interpolation(enabled),
+        Err(error) => tracing::warn!(%error, "couldn't load smooth motion preference"),
+    }
+    let mut open_menu: Option<OpenMenu> = None;
+    let mut input = PlayerInput::new(bridge);
     let mut last_tick = Instant::now();
+    let mut next_render = last_tick;
+    let mut frame_clock_enabled = false;
     let mut wait = Duration::ZERO;
     let mut effects = Vec::new();
     'running: loop {
+        let mut frame_due = false;
         let deadline = Instant::now() + wait;
         let message = match rx.recv_timeout(wait) {
             Ok(msg) => Some(msg),
@@ -142,13 +187,31 @@ fn run(
                 Some(Msg::Poll(task)) => {
                     task.run();
                 }
+                Some(Msg::Frame) => {
+                    inbox.frame_pending.store(false, Ordering::Relaxed);
+                    frame_due = true;
+                }
+                Some(Msg::View(event))
+                    if open_menu.is_some()
+                        && !matches!(event, ViewEvent::Resized(_) | ViewEvent::Focus(_)) => {}
                 Some(Msg::View(event)) => {
                     view::translate(event, viewport, &mut effects);
                     let mut player = player.lock().unwrap();
                     for effect in effects.drain(..) {
                         match effect {
                             Effect::Event(event) => {
-                                player.handle_event(event);
+                                if let Some(menu) = input.handle_event(&mut player, event) {
+                                    let context_menu = ContextMenu {
+                                        items: menu.items.clone(),
+                                        at: menu.position(viewport.scale()),
+                                        smooth_motion: player.frame_interpolation(),
+                                    };
+                                    if outputs.try_send(Output::Menu(context_menu)).is_ok() {
+                                        open_menu = Some(menu);
+                                    } else {
+                                        menu.close(&mut player, None);
+                                    }
+                                }
                             }
                             Effect::MouseInStage(inside) => player.set_mouse_in_stage(inside),
                             Effect::Resize(next) if next != viewport => {
@@ -156,6 +219,17 @@ fn run(
                                 viewport = next;
                             }
                             Effect::Resize(_) => {}
+                        }
+                    }
+                }
+                Some(Msg::MenuClosed(selection)) => {
+                    if let Some(menu) = open_menu.take() {
+                        let mut player = player.lock().unwrap();
+                        menu.close(&mut player, selection);
+                        if matches!(selection, Some(MenuSelection::SmoothMotion))
+                            && let Err(error) = smooth_motion.save(player.frame_interpolation())
+                        {
+                            tracing::error!(%error, "couldn't save smooth motion preference");
                         }
                     }
                 }
@@ -173,10 +247,23 @@ fn run(
         let mut player = player.lock().unwrap();
         player.tick(FloatDuration::from_std(now - last_tick));
         last_tick = now;
-        if player.needs_render() {
+        let interpolating = player.interpolating();
+        if display_frames && interpolating != frame_clock_enabled {
+            let _ = outputs.try_send(Output::FrameClock(interpolating));
+            frame_clock_enabled = interpolating;
+        }
+        if player.needs_render()
+            && (!interpolating
+                || (display_frames && frame_due)
+                || (!display_frames && now >= next_render))
+        {
             player.render();
+            next_render = now + Duration::from_secs_f64(1.0 / 60.0);
         }
         wait = player.time_til_next_frame();
+        if interpolating && !display_frames {
+            wait = wait.min(next_render.saturating_duration_since(Instant::now()));
+        }
     }
     tasks.borrow_mut().clear();
     while let Ok(message) = rx.try_recv() {
@@ -185,4 +272,38 @@ fn run(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_frames_coalesce_while_input_still_arrives() {
+        let (messages, received) = mpsc::channel();
+        let inbox = Inbox {
+            messages,
+            frame_pending: Arc::new(AtomicBool::new(false)),
+        };
+        thread::scope(|scope| {
+            for _ in 0..8 {
+                let inbox = &inbox;
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        inbox.request_frame();
+                    }
+                });
+            }
+        });
+        inbox.post(Msg::View(ViewEvent::Focus(false)));
+        assert!(matches!(received.try_recv(), Ok(Msg::Frame)));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Msg::View(ViewEvent::Focus(false)))
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
 }

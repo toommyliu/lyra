@@ -2,11 +2,16 @@ use std::ptr::NonNull;
 
 use crate::player::Surface;
 use gpui::{Bounds, Pixels, Window};
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    rc::Retained,
+    runtime::{NSObject, NSObjectProtocol},
+    sel,
+};
 use objc2_app_kit::{NSView, NSWindowOrderingMode};
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSPoint, NSRect, NSSize};
-use objc2_quartz_core::{CAMetalLayer, CATransaction};
+use objc2_foundation::{NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize};
+use objc2_quartz_core::{CADisplayLink, CAMetalLayer, CATransaction};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 #[derive(Debug, thiserror::Error)]
@@ -19,8 +24,24 @@ pub enum Error {
 
 pub(super) struct NativeView {
     view: Retained<NSView>,
+    input_view: Retained<NSView>,
     layer: Retained<CAMetalLayer>,
+    frame_clock: Option<Retained<CADisplayLink>>,
 }
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "LyraFrameClockTarget"]
+    #[ivars = Box<dyn Fn()>]
+    struct FrameClockTarget;
+
+    impl FrameClockTarget {
+        #[unsafe(method(frame:))]
+        fn frame(&self, _clock: &CADisplayLink) {
+            (self.ivars())();
+        }
+    }
+);
 
 impl NativeView {
     pub(super) fn attach(window: &Window) -> Result<NativeView, Error> {
@@ -38,11 +59,54 @@ impl NativeView {
         view.setLayer(Some(&layer));
         view.setWantsLayer(true);
         content.addSubview_positioned_relativeTo(&view, NSWindowOrderingMode::Below, None);
-        Ok(NativeView { view, layer })
+        let input_view =
+            unsafe { Retained::retain(handle.ns_view.cast::<NSView>().as_ptr()) }.unwrap();
+        Ok(NativeView {
+            view,
+            input_view,
+            layer,
+            frame_clock: None,
+        })
+    }
+
+    pub(super) fn supports_display_frames(&self) -> bool {
+        self.view
+            .respondsToSelector(sel!(displayLinkWithTarget:selector:))
+    }
+
+    pub(super) fn connect_frames(&mut self, on_frame: impl Fn() + 'static) {
+        if !self.supports_display_frames() {
+            return;
+        }
+        let target: Retained<FrameClockTarget> = unsafe {
+            msg_send![
+                super(FrameClockTarget::alloc().set_ivars(Box::new(on_frame))),
+                init
+            ]
+        };
+        let clock = unsafe {
+            self.view
+                .displayLinkWithTarget_selector(&target, sel!(frame:))
+        };
+        clock.setPaused(true);
+        unsafe {
+            clock.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
+        }
+        self.frame_clock = Some(clock);
+    }
+
+    pub(super) fn set_frame_clock(&self, enabled: bool) {
+        if let Some(clock) = &self.frame_clock {
+            clock.setPaused(!enabled);
+        }
     }
 
     pub(super) fn surface(&self) -> Surface {
         unsafe { Surface::from_metal_layer(NonNull::from(&*self.layer).cast()) }
+    }
+
+    pub(super) fn menu_views(&self) -> (Retained<NSView>, Retained<NSView>) {
+        (self.view.clone(), self.input_view.clone())
     }
 
     pub(super) fn set_frame(&self, bounds: Bounds<Pixels>, scale: f32) {
@@ -66,6 +130,9 @@ impl NativeView {
 
 impl Drop for NativeView {
     fn drop(&mut self) {
+        if let Some(clock) = &self.frame_clock {
+            clock.invalidate();
+        }
         self.view.removeFromSuperview();
     }
 }
