@@ -1,10 +1,20 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-cargo build --locked
+profile=dev
+directory=debug
+case "${1-}" in
+    --debug) shift ;;
+    --release) profile=release; directory=release; shift ;;
+esac
+if [ "$#" -ne 0 ]; then
+    printf 'Usage: %s [--debug|--release]\n' "$0" >&2
+    exit 2
+fi
+cargo build --profile "$profile" --locked
 bundle=target/Lyra.app/Contents
 mkdir -p "$bundle/MacOS"
-cp target/debug/lyra "$bundle/MacOS/lyra"
+cp "target/$directory/lyra" "$bundle/MacOS/lyra"
 cat > "$bundle/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
