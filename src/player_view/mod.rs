@@ -1,20 +1,18 @@
 mod input;
+mod text_input;
 
 #[path = "macos.rs"]
 mod native;
 
 use std::ops::Range;
 
-use crate::player::{
-    Output, Player,
-    view::{Ime, ViewEvent},
-};
+use crate::player::{Output, Player, view::ViewEvent};
 use gpui::{
-    App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, Hitbox, HitboxBehavior, InteractiveElement as _,
-    IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, Styled as _, Subscription,
-    UTF16Selection, Window, canvas, div, prelude::FluentBuilder as _,
+    App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle,
+    Focusable, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent,
+    KeyUpEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Render, ScrollWheelEvent, Styled as _, Subscription, Window,
+    canvas, div, prelude::FluentBuilder as _,
 };
 use native::NativeView;
 use ruffle_core::backend::ui::MouseCursor;
@@ -141,7 +139,7 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
     window.set_cursor_style(cursor, &hitbox);
     window.handle_input(
         &this.read(cx).focus,
-        ElementInputHandler::new(hitbox.bounds, this.clone()),
+        text_input::TextInput::new(hitbox.bounds, this.clone()),
         cx,
     );
     let down_view = this.clone();
@@ -236,100 +234,5 @@ impl Render for PlayerView {
 impl Focusable for PlayerView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
-    }
-}
-
-impl EntityInputHandler for PlayerView {
-    fn text_for_range(
-        &mut self,
-        _range: Range<usize>,
-        _adjusted: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<String> {
-        None
-    }
-
-    fn selected_text_range(
-        &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<UTF16Selection> {
-        let end = self.marked.as_ref().map_or(0, |range| range.end);
-        Some(UTF16Selection {
-            range: end..end,
-            reversed: false,
-        })
-    }
-
-    fn marked_text_range(
-        &self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Range<usize>> {
-        self.marked.clone()
-    }
-
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        self.marked = None;
-        self.session.send(ViewEvent::Ime(Ime::Preedit {
-            text: String::new(),
-            cursor: None,
-        }));
-    }
-
-    fn replace_text_in_range(
-        &mut self,
-        _range: Option<Range<usize>>,
-        text: &str,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        let event = match self.marked.take() {
-            Some(_) => ViewEvent::Ime(Ime::Commit(text.to_owned())),
-            None => ViewEvent::Text(text.to_owned()),
-        };
-        self.session.send(event);
-    }
-
-    fn replace_and_mark_text_in_range(
-        &mut self,
-        _range: Option<Range<usize>>,
-        new_text: &str,
-        new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        self.marked = (!new_text.is_empty()).then(|| 0..new_text.encode_utf16().count());
-        self.session.send(ViewEvent::Ime(Ime::Preedit {
-            text: new_text.to_owned(),
-            cursor: new_selected_range.map(|range| {
-                input::utf16_to_byte(new_text, range.start)
-                    ..input::utf16_to_byte(new_text, range.end)
-            }),
-        }));
-    }
-
-    fn bounds_for_range(
-        &mut self,
-        _range: Range<usize>,
-        element_bounds: Bounds<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<Bounds<Pixels>> {
-        Some(Bounds::new(
-            gpui::point(element_bounds.left(), element_bounds.bottom()),
-            gpui::size(gpui::px(1.0), gpui::px(1.0)),
-        ))
-    }
-
-    fn character_index_for_point(
-        &mut self,
-        _point: gpui::Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> Option<usize> {
-        None
     }
 }
