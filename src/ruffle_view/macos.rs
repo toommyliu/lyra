@@ -1,6 +1,6 @@
 use std::ptr::NonNull;
 
-use crate::player::Surface;
+use crate::ruffle::Surface;
 use gpui::{Bounds, Pixels, Window};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,

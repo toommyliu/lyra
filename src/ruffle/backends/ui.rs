@@ -5,7 +5,7 @@ use ruffle_core::backend::ui::{
 use ruffle_core::font::FontQuery;
 use url::Url;
 
-use crate::player::Output;
+use crate::ruffle::Output;
 
 pub(crate) struct Ui {
     clipboard: arboard::Clipboard,

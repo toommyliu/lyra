@@ -61,12 +61,12 @@ impl Inbox {
     }
 }
 
-pub(crate) struct Player {
+pub(crate) struct Runtime {
     inbox: Inbox,
     thread: Option<thread::JoinHandle<()>>,
 }
 
-impl Player {
+impl Runtime {
     pub(crate) fn spawn(
         surface: Surface,
         data: PathBuf,
@@ -118,7 +118,7 @@ impl Player {
     }
 }
 
-impl Drop for Player {
+impl Drop for Runtime {
     fn drop(&mut self) {
         self.inbox.post(Msg::Stop);
         if let Some(thread) = self.thread.take() {

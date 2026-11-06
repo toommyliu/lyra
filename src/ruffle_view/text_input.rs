@@ -2,17 +2,17 @@ use std::ops::Range;
 
 use gpui::{App, Bounds, Entity, InputHandler, Pixels, UTF16Selection, Window};
 
-use crate::player::view::{Ime, ViewEvent};
+use crate::ruffle::view::{Ime, ViewEvent};
 
-use super::{PlayerView, input};
+use super::{RuffleView, input};
 
 pub(super) struct TextInput {
-    view: Entity<PlayerView>,
+    view: Entity<RuffleView>,
     bounds: Bounds<Pixels>,
 }
 
 impl TextInput {
-    pub(super) fn new(bounds: Bounds<Pixels>, view: Entity<PlayerView>) -> Self {
+    pub(super) fn new(bounds: Bounds<Pixels>, view: Entity<RuffleView>) -> Self {
         Self { view, bounds }
     }
 }

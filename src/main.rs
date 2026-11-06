@@ -3,8 +3,8 @@ compile_error!("Lyra supports macOS only.");
 
 mod logging;
 mod net;
-mod player;
-mod player_view;
+mod ruffle;
+mod ruffle_view;
 
 use gpui::{
     Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
-            let view = player_view::PlayerView::new(data, device, window, cx)
+            let view = ruffle_view::RuffleView::new(data, device, window, cx)
                 .expect("create the AQW player view");
             window.focus(&gpui::Focusable::focus_handle(view.read(cx), cx), cx);
             view

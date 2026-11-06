@@ -12,8 +12,8 @@ use ruffle_core::loader::Error;
 use ruffle_core::socket::{ConnectionState, SocketAction, SocketHandle};
 use url::{ParseError, Url};
 
-use crate::player::net::{HttpBody, HttpRequest, HttpResponse, Method, Net, SocketEvent};
-use crate::player::{Inbox, Msg};
+use crate::ruffle::net::{HttpBody, HttpRequest, HttpResponse, Method, Net, SocketEvent};
+use crate::ruffle::{Inbox, Msg};
 
 pub(crate) type Tasks = Rc<RefCell<Vec<async_task::Task<()>>>>;
 

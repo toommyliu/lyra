@@ -8,7 +8,7 @@ mod native;
 
 use std::ops::Range;
 
-use crate::player::{Output, Player, view::ViewEvent};
+use crate::ruffle::{Output, Runtime, view::ViewEvent};
 use gpui::{
     App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle,
     Focusable, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent,
@@ -19,10 +19,10 @@ use gpui::{
 use native::NativeView;
 use ruffle_core::backend::ui::MouseCursor;
 
-pub struct PlayerView {
-    session: Player,
+pub struct RuffleView {
+    session: Runtime,
     error: Option<String>,
-    stats: Option<crate::player::stats::Report>,
+    stats: Option<crate::ruffle::stats::Report>,
     stats_placement: stats::Placement,
     native: NativeView,
     focus: FocusHandle,
@@ -34,18 +34,18 @@ pub struct PlayerView {
     _subscriptions: [Subscription; 3],
 }
 
-impl PlayerView {
+impl RuffleView {
     pub fn new(
         data: std::path::PathBuf,
         device: reqwest::header::HeaderValue,
         window: &mut Window,
         cx: &mut App,
-    ) -> anyhow::Result<Entity<PlayerView>> {
+    ) -> anyhow::Result<Entity<RuffleView>> {
         let mut native = NativeView::attach(window)?;
         let (failed, failures) = async_channel::bounded(1);
         let (outputs_tx, outputs) = async_channel::unbounded();
         let (stats_tx, mut stats) = tokio::sync::watch::channel(None);
-        let session = Player::spawn(
+        let session = Runtime::spawn(
             native.surface(),
             data,
             device,
@@ -206,7 +206,7 @@ impl PlayerView {
     }
 }
 
-fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut App) {
+fn paint(this: Entity<RuffleView>, hitbox: Hitbox, window: &mut Window, cx: &mut App) {
     let cursor = match this.read(cx).cursor {
         MouseCursor::Arrow => CursorStyle::Arrow,
         MouseCursor::Hand => CursorStyle::PointingHand,
@@ -275,7 +275,7 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
     });
 }
 
-impl Render for PlayerView {
+impl Render for RuffleView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         let prepaint = {
@@ -314,7 +314,7 @@ impl Render for PlayerView {
     }
 }
 
-impl Focusable for PlayerView {
+impl Focusable for RuffleView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus.clone()
     }

@@ -1,4 +1,4 @@
-use crate::player::view::{
+use crate::ruffle::view::{
     Key, KeyCode, Modifiers, MouseButton, NamedKey, Point, ViewEvent, Viewport, WheelDelta,
 };
 use gpui::{Bounds, Keystroke, Pixels, ScrollDelta};

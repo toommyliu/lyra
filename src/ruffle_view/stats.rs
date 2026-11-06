@@ -5,7 +5,7 @@ use gpui::{
     anchored, canvas, div, fill, point, px, rgb, rgba, size,
 };
 
-use crate::player::stats::{GRAPH_SAMPLES, Report, Timing};
+use crate::ruffle::stats::{GRAPH_SAMPLES, Report, Timing};
 
 const LOGIC_COLOR: u32 = 0x7bb7ff;
 const RENDER_COLOR: u32 = 0xa9e9af;
@@ -22,7 +22,7 @@ pub(super) struct Placement {
 pub(super) fn overlay(
     report: Report,
     placement: &Placement,
-    this: Entity<super::PlayerView>,
+    this: Entity<super::RuffleView>,
     window: &Window,
 ) -> impl IntoElement {
     let fps = report.game_fps.map_or_else(
@@ -128,7 +128,7 @@ fn timing(timing: Option<Timing>) -> String {
     )
 }
 
-fn paint_drag(this: Entity<super::PlayerView>, hitbox: Hitbox, window: &mut Window, _: &mut App) {
+fn paint_drag(this: Entity<super::RuffleView>, hitbox: Hitbox, window: &mut Window, _: &mut App) {
     let down = this.clone();
     let down_hitbox = hitbox.clone();
     window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {

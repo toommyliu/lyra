@@ -7,7 +7,7 @@ use objc2::{
 use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView};
 use objc2_foundation::{NSPoint, NSString};
 
-use crate::player::context_menu::{ContextMenu, MenuSelection};
+use crate::ruffle::context_menu::{ContextMenu, MenuSelection};
 
 define_class!(
     #[unsafe(super(NSObject))]
