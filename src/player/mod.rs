@@ -11,7 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ruffle_core::{FloatDuration, PlayerBuilder, config::Letterbox, tag_utils::SwfMovie};
+use ruffle_core::{
+    FloatDuration, PlayerBuilder, backend::ui::MouseCursor, config::Letterbox, tag_utils::SwfMovie,
+};
 use ruffle_frontend_utils::backends::storage::DiskStorageBackend;
 
 use backends::{Navigator, Tasks, Ui};
@@ -23,6 +25,10 @@ pub(crate) enum Msg {
     Poll(async_task::Runnable),
     Wake,
     Stop,
+}
+
+pub(crate) enum Output {
+    Cursor(MouseCursor),
 }
 
 #[derive(Clone)]
@@ -45,6 +51,7 @@ impl Player {
         data: PathBuf,
         device: reqwest::header::HeaderValue,
         failures: async_channel::Sender<String>,
+        outputs: async_channel::Sender<Output>,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         let inbox = Inbox(tx);
@@ -52,7 +59,7 @@ impl Player {
         let thread = thread::Builder::new()
             .name("lyra-player".into())
             .spawn(move || {
-                if let Err(error) = run(surface, data, device, rx, outbox) {
+                if let Err(error) = run(surface, data, device, rx, outbox, outputs) {
                     tracing::error!(%error, "player failed");
                     let _ = failures.try_send(error.to_string());
                 }
@@ -83,6 +90,7 @@ fn run(
     device: reqwest::header::HeaderValue,
     rx: mpsc::Receiver<Msg>,
     inbox: Inbox,
+    outputs: async_channel::Sender<Output>,
 ) -> anyhow::Result<()> {
     let mut viewport = loop {
         match rx.recv()? {
@@ -108,7 +116,7 @@ fn run(
         .with_navigator(Navigator::new(net, inbox, tasks.clone()))
         .with_boxed_audio(backends::audio::audio())
         .with_external_interface(Box::new(bridge::Bridge))
-        .with_ui(Ui::new(arboard::Clipboard::new()?))
+        .with_ui(Ui::new(arboard::Clipboard::new()?, outputs))
         .with_storage(Box::new(DiskStorageBackend::new(
             data.join("shared-objects"),
         )))

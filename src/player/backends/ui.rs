@@ -5,15 +5,19 @@ use ruffle_core::backend::ui::{
 use ruffle_core::font::FontQuery;
 use url::Url;
 
+use crate::player::Output;
+
 pub(crate) struct Ui {
     clipboard: arboard::Clipboard,
+    outputs: async_channel::Sender<Output>,
     rest: NullUiBackend,
 }
 
 impl Ui {
-    pub(crate) fn new(clipboard: arboard::Clipboard) -> Ui {
+    pub(crate) fn new(clipboard: arboard::Clipboard, outputs: async_channel::Sender<Output>) -> Ui {
         Ui {
             clipboard,
+            outputs,
             rest: NullUiBackend::new(),
         }
     }
@@ -37,7 +41,7 @@ impl UiBackend for Ui {
     }
 
     fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
-        self.rest.set_mouse_cursor(cursor);
+        let _ = self.outputs.try_send(Output::Cursor(cursor));
     }
 
     fn set_fullscreen(&mut self, is_full: bool) -> Result<(), FullscreenError> {

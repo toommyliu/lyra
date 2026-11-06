@@ -6,17 +6,18 @@ mod native;
 use std::ops::Range;
 
 use crate::player::{
-    Player,
+    Output, Player,
     view::{Ime, ViewEvent},
 };
 use gpui::{
-    App, AppContext as _, Bounds, Context, DispatchPhase, ElementInputHandler, Entity,
+    App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, Hitbox, HitboxBehavior, InteractiveElement as _,
     IntoElement, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Render, ScrollWheelEvent, Styled as _, Subscription,
     UTF16Selection, Window, canvas, div, prelude::FluentBuilder as _,
 };
 use native::NativeView;
+use ruffle_core::backend::ui::MouseCursor;
 
 pub struct PlayerView {
     session: Player,
@@ -24,6 +25,7 @@ pub struct PlayerView {
     native: NativeView,
     focus: FocusHandle,
     hovered: bool,
+    cursor: MouseCursor,
     marked: Option<Range<usize>>,
     modifiers: gpui::Modifiers,
     _subscriptions: [Subscription; 3],
@@ -38,8 +40,23 @@ impl PlayerView {
     ) -> anyhow::Result<Entity<PlayerView>> {
         let native = NativeView::attach(window)?;
         let (failed, failures) = async_channel::bounded(1);
-        let session = Player::spawn(native.surface(), data, device, failed)?;
+        let (outputs_tx, outputs) = async_channel::unbounded();
+        let session = Player::spawn(native.surface(), data, device, failed, outputs_tx)?;
         Ok(cx.new(|cx| {
+            cx.spawn(async move |this, cx| {
+                while let Ok(Output::Cursor(cursor)) = outputs.recv().await {
+                    if this
+                        .update(cx, |this: &mut Self, cx| {
+                            this.cursor = cursor;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
             cx.spawn(async move |this, cx| {
                 if let Ok(error) = failures.recv().await {
                     let _ = this.update(cx, |this: &mut Self, cx| {
@@ -73,6 +90,7 @@ impl PlayerView {
                 native,
                 focus,
                 hovered: false,
+                cursor: MouseCursor::Arrow,
                 marked: None,
                 modifiers: Default::default(),
                 _subscriptions: subscriptions,
@@ -114,6 +132,13 @@ impl PlayerView {
 }
 
 fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut App) {
+    let cursor = match this.read(cx).cursor {
+        MouseCursor::Arrow => CursorStyle::Arrow,
+        MouseCursor::Hand => CursorStyle::PointingHand,
+        MouseCursor::IBeam => CursorStyle::IBeam,
+        MouseCursor::Grab => CursorStyle::OpenHand,
+    };
+    window.set_cursor_style(cursor, &hitbox);
     window.handle_input(
         &this.read(cx).focus,
         ElementInputHandler::new(hitbox.bounds, this.clone()),
