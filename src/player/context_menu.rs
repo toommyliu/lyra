@@ -9,12 +9,14 @@ pub(crate) struct ContextMenu {
     pub(crate) items: Vec<ContextMenuItem>,
     pub(crate) at: Point,
     pub(crate) smooth_motion: bool,
+    pub(crate) stats: bool,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum MenuSelection {
     Ruffle(usize),
     SmoothMotion,
+    Stats,
 }
 
 pub(super) struct OpenMenu {

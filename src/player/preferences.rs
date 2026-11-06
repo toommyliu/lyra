@@ -35,7 +35,7 @@ mod tests {
     fn boolean_preferences_default_off_and_survive_restarts() {
         let mut random = [0; 8];
         getrandom::getrandom(&mut random).unwrap();
-        for name in ["smooth-motion"] {
+        for name in ["smooth-motion", "show-stats"] {
             let path =
                 std::env::temp_dir().join(format!("lyra-{name}-{:x}", u64::from_ne_bytes(random)));
             let preferences = BoolPreference::new(path.clone());

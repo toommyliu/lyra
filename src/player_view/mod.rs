@@ -1,5 +1,6 @@
 mod input;
 mod menu;
+mod stats;
 mod text_input;
 
 #[path = "macos.rs"]
@@ -21,9 +22,12 @@ use ruffle_core::backend::ui::MouseCursor;
 pub struct PlayerView {
     session: Player,
     error: Option<String>,
+    stats: Option<crate::player::stats::Report>,
+    stats_placement: stats::Placement,
     native: NativeView,
     focus: FocusHandle,
     hovered: bool,
+    mouse: input::Mouse,
     cursor: MouseCursor,
     marked: Option<Range<usize>>,
     modifiers: gpui::Modifiers,
@@ -40,17 +44,34 @@ impl PlayerView {
         let mut native = NativeView::attach(window)?;
         let (failed, failures) = async_channel::bounded(1);
         let (outputs_tx, outputs) = async_channel::unbounded();
+        let (stats_tx, mut stats) = tokio::sync::watch::channel(None);
         let session = Player::spawn(
             native.surface(),
             data,
             device,
             failed,
             outputs_tx,
+            stats_tx,
             native.supports_display_frames(),
         )?;
         let inbox = session.inbox();
         native.connect_frames(move || inbox.request_frame());
         Ok(cx.new(|cx| {
+            cx.spawn(async move |this, cx| {
+                while stats.changed().await.is_ok() {
+                    let report = *stats.borrow_and_update();
+                    if this
+                        .update(cx, |this: &mut Self, cx| {
+                            this.stats = report;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .detach();
             cx.spawn_in(window, async move |this, cx| {
                 while let Ok(output) = outputs.recv().await {
                     let menu = match output {
@@ -138,9 +159,12 @@ impl PlayerView {
             Self {
                 session,
                 error: None,
+                stats: None,
+                stats_placement: stats::Placement::default(),
                 native,
                 focus,
                 hovered: false,
+                mouse: input::Mouse::default(),
                 cursor: MouseCursor::Arrow,
                 marked: None,
                 modifiers: Default::default(),
@@ -204,25 +228,20 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
             }
             down_view.update(cx, |this, cx| {
                 window.focus(&this.focus, cx);
-                this.session.send(ViewEvent::MouseDown {
-                    at: input::point(event.position, down_hitbox.origin),
-                    button: input::button(event.button),
-                    clicks: event.click_count,
-                });
+                let event = this.mouse.down(event, down_hitbox.origin);
+                this.session.send(event);
             });
         }
     });
     let up_view = this.clone();
     let up_hitbox = hitbox.clone();
     window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-        if phase == DispatchPhase::Bubble
-            && (up_hitbox.is_hovered(window) || window.captured_hitbox() == Some(up_hitbox.id))
-        {
+        if phase == DispatchPhase::Bubble {
             up_view.update(cx, |this, _| {
-                this.session.send(ViewEvent::MouseUp {
-                    at: input::point(event.position, up_hitbox.origin),
-                    button: input::button(event.button),
-                })
+                let over_game = up_hitbox.is_hovered(window);
+                if let Some(event) = this.mouse.up(event, up_hitbox.origin, over_game) {
+                    this.session.send(event);
+                }
             });
         }
     });
@@ -233,8 +252,8 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
             return;
         }
         let hovered = move_hitbox.is_hovered(window);
-        let captured = window.captured_hitbox() == Some(move_hitbox.id);
         move_view.update(cx, |this, _| {
+            let captured = this.mouse.dragging(event.pressed_button);
             if hovered || captured {
                 this.session.send(ViewEvent::MouseMove(input::point(
                     event.position,
@@ -257,7 +276,7 @@ fn paint(this: Entity<PlayerView>, hitbox: Hitbox, window: &mut Window, cx: &mut
 }
 
 impl Render for PlayerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         let prepaint = {
             let this = this.clone();
@@ -267,6 +286,7 @@ impl Render for PlayerView {
             }
         };
         div()
+            .relative()
             .size_full()
             .when_some(self.error.clone(), |view, error| {
                 view.bg(gpui::rgb(0x181818))
@@ -283,6 +303,14 @@ impl Render for PlayerView {
                 })
                 .size_full(),
             )
+            .when_some(self.stats, |view, stats| {
+                view.child(stats::overlay(
+                    stats,
+                    &self.stats_placement,
+                    cx.entity(),
+                    window,
+                ))
+            })
     }
 }
 

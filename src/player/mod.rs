@@ -3,6 +3,7 @@ mod bridge;
 pub(crate) mod context_menu;
 mod net;
 mod preferences;
+pub(crate) mod stats;
 mod surface;
 pub(crate) mod view;
 
@@ -72,6 +73,7 @@ impl Player {
         device: reqwest::header::HeaderValue,
         failures: async_channel::Sender<String>,
         outputs: async_channel::Sender<Output>,
+        stats: tokio::sync::watch::Sender<Option<stats::Report>>,
         display_frames: bool,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
@@ -83,8 +85,16 @@ impl Player {
         let thread = thread::Builder::new()
             .name("lyra-player".into())
             .spawn(move || {
-                if let Err(error) = run(surface, data, device, rx, outbox, outputs, display_frames)
-                {
+                if let Err(error) = run(
+                    surface,
+                    data,
+                    device,
+                    rx,
+                    outbox,
+                    outputs,
+                    stats,
+                    display_frames,
+                ) {
                     tracing::error!(%error, "player failed");
                     let _ = failures.try_send(error.to_string());
                 }
@@ -124,6 +134,7 @@ fn run(
     rx: mpsc::Receiver<Msg>,
     inbox: Inbox,
     outputs: async_channel::Sender<Output>,
+    stats: tokio::sync::watch::Sender<Option<stats::Report>>,
     display_frames: bool,
 ) -> anyhow::Result<()> {
     let mut viewport = loop {
@@ -167,6 +178,13 @@ fn run(
     }
     let mut open_menu: Option<OpenMenu> = None;
     let mut input = PlayerInput::new(bridge);
+    let show_stats = preferences::BoolPreference::new(data.join("show-stats"));
+    let stats_enabled = show_stats.load().unwrap_or_else(|error| {
+        tracing::warn!(%error, "couldn't load stats preference");
+        false
+    });
+    let mut stats = stats::Collector::new(stats);
+    stats.set_enabled(&mut player.lock().unwrap(), stats_enabled);
     let mut last_tick = Instant::now();
     let mut next_render = last_tick;
     let mut frame_clock_enabled = false;
@@ -205,6 +223,7 @@ fn run(
                                         items: menu.items.clone(),
                                         at: menu.position(viewport.scale()),
                                         smooth_motion: player.frame_interpolation(),
+                                        stats: stats.enabled(),
                                     };
                                     if outputs.try_send(Output::Menu(context_menu)).is_ok() {
                                         open_menu = Some(menu);
@@ -226,6 +245,13 @@ fn run(
                     if let Some(menu) = open_menu.take() {
                         let mut player = player.lock().unwrap();
                         menu.close(&mut player, selection);
+                        if matches!(selection, Some(MenuSelection::Stats)) {
+                            let enabled = !stats.enabled();
+                            stats.set_enabled(&mut player, enabled);
+                            if let Err(error) = show_stats.save(enabled) {
+                                tracing::error!(%error, "couldn't save stats preference");
+                            }
+                        }
                         if matches!(selection, Some(MenuSelection::SmoothMotion))
                             && let Err(error) = smooth_motion.save(player.frame_interpolation())
                         {
@@ -260,6 +286,7 @@ fn run(
             player.render();
             next_render = now + Duration::from_secs_f64(1.0 / 60.0);
         }
+        stats.sample(&mut player, viewport.dimensions());
         wait = player.time_til_next_frame();
         if interpolating && !display_frames {
             wait = wait.min(next_render.saturating_duration_since(Instant::now()));

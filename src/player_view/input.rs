@@ -3,6 +3,46 @@ use crate::player::view::{
 };
 use gpui::{Bounds, Keystroke, Pixels, ScrollDelta};
 
+#[derive(Default)]
+pub(super) struct Mouse {
+    pressed: Vec<gpui::MouseButton>,
+}
+
+impl Mouse {
+    pub(super) fn down(
+        &mut self,
+        event: &gpui::MouseDownEvent,
+        origin: gpui::Point<Pixels>,
+    ) -> ViewEvent {
+        if !self.pressed.contains(&event.button) {
+            self.pressed.push(event.button);
+        }
+        ViewEvent::MouseDown {
+            at: point(event.position, origin),
+            button: button(event.button),
+            clicks: event.click_count,
+        }
+    }
+
+    pub(super) fn up(
+        &mut self,
+        event: &gpui::MouseUpEvent,
+        origin: gpui::Point<Pixels>,
+        over_game: bool,
+    ) -> Option<ViewEvent> {
+        let owned = self.pressed.contains(&event.button);
+        self.pressed.retain(|button| *button != event.button);
+        (owned || over_game).then(|| ViewEvent::MouseUp {
+            at: point(event.position, origin),
+            button: button(event.button),
+        })
+    }
+
+    pub(super) fn dragging(&self, button: Option<gpui::MouseButton>) -> bool {
+        button.is_some_and(|button| self.pressed.contains(&button))
+    }
+}
+
 pub(super) fn key(keystroke: &Keystroke) -> Option<Key> {
     let character = |text: &str| {
         let mut chars = text.chars();
@@ -146,6 +186,71 @@ pub(super) fn utf16_to_byte(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn game_press_keeps_its_release_when_a_repainted_hud_covers_the_pointer() {
+        for button in [gpui::MouseButton::Left, gpui::MouseButton::Middle] {
+            let mut mouse = Mouse::default();
+            let origin = gpui::point(gpui::px(0.0), gpui::px(0.0));
+            let down = gpui::MouseDownEvent {
+                button,
+                position: gpui::point(gpui::px(100.0), gpui::px(100.0)),
+                click_count: 1,
+                ..Default::default()
+            };
+            assert!(matches!(
+                mouse.down(&down, origin),
+                ViewEvent::MouseDown { .. }
+            ));
+            assert!(mouse.dragging(Some(button)));
+            let up = gpui::MouseUpEvent {
+                button,
+                position: gpui::point(gpui::px(800.0), gpui::px(80.0)),
+                ..Default::default()
+            };
+            assert_eq!(
+                mouse.up(&up, origin, false),
+                Some(ViewEvent::MouseUp {
+                    at: Point { x: 800.0, y: 80.0 },
+                    button: super::button(button),
+                })
+            );
+            assert!(!mouse.dragging(Some(button)));
+            assert!(mouse.up(&up, origin, false).is_none());
+        }
+    }
+
+    #[test]
+    fn hud_releases_do_not_claim_or_clear_a_different_game_press() {
+        let mut mouse = Mouse::default();
+        let origin = gpui::point(gpui::px(0.0), gpui::px(0.0));
+        let hud_release = gpui::MouseUpEvent {
+            button: gpui::MouseButton::Left,
+            ..Default::default()
+        };
+        assert!(mouse.up(&hud_release, origin, false).is_none());
+        mouse.down(
+            &gpui::MouseDownEvent {
+                button: gpui::MouseButton::Middle,
+                ..Default::default()
+            },
+            origin,
+        );
+        assert!(mouse.up(&hud_release, origin, false).is_none());
+        assert!(mouse.dragging(Some(gpui::MouseButton::Middle)));
+        assert!(
+            mouse
+                .up(
+                    &gpui::MouseUpEvent {
+                        button: gpui::MouseButton::Middle,
+                        ..Default::default()
+                    },
+                    origin,
+                    false
+                )
+                .is_some()
+        );
+    }
 
     fn keystroke(key: &str, key_char: Option<&str>, modifiers: gpui::Modifiers) -> Keystroke {
         Keystroke {

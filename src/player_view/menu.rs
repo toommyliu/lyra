@@ -56,6 +56,15 @@ pub(super) fn show(view: &NSView, context: ContextMenu) -> Option<MenuSelection>
         smooth_motion.setAction(Some(sel!(selectItem:)));
     }
     menu.addItem(&smooth_motion);
+    let stats = NSMenuItem::new(mtm);
+    stats.setTitle(&NSString::from_str("Show stats"));
+    stats.setState(isize::from(context.stats));
+    stats.setTag(context.items.len() as isize + 1);
+    unsafe {
+        stats.setTarget(Some(&target));
+        stats.setAction(Some(sel!(selectItem:)));
+    }
+    menu.addItem(&stats);
     let y = if view.isFlipped() {
         f64::from(context.at.y)
     } else {
@@ -69,6 +78,8 @@ pub(super) fn show(view: &NSView, context: ContextMenu) -> Option<MenuSelection>
     target.ivars().get().map(|index| {
         if index == context.items.len() {
             MenuSelection::SmoothMotion
+        } else if index == context.items.len() + 1 {
+            MenuSelection::Stats
         } else {
             MenuSelection::Ruffle(index)
         }
