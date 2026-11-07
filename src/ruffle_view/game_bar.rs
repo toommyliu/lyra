@@ -171,6 +171,7 @@ impl RuffleView {
         self.bar.open = None;
         self.bar.submenu = None;
         window.focus(&self.focus, cx);
+        self.restore_modifiers(window);
         cx.notify();
     }
 
@@ -193,6 +194,7 @@ impl RuffleView {
         }
         self.close_menu(window, cx);
         if self.player_bounds.contains(&at) {
+            self.mouse.swallow(event.button);
             cx.stop_propagation();
         }
     }
@@ -223,8 +225,17 @@ impl RuffleView {
                 self.start_edit(field.after(shift));
             }
             "up" | "down" => {
+                let stored = i64::from(field.get(self.automation.auto_relogin()));
+                let edit = self.bar.edit.as_mut().unwrap();
                 let step = if shift { 10 } else { 1 };
-                self.step(field, if key == "up" { step } else { -step }, cx);
+                let draft = edit.text.parse().unwrap_or(stored);
+                let stepped = if key == "up" {
+                    draft + step
+                } else {
+                    draft - step
+                };
+                edit.text = stepped.max(0).to_string();
+                self.commit_edit(cx);
                 self.start_edit(field);
             }
             "backspace" => {
@@ -269,22 +280,6 @@ impl RuffleView {
             self.change_auto_relogin(|settings| edit.field.set(settings, value), cx);
         }
         cx.notify();
-    }
-
-    fn step(&mut self, field: Field, delta: i64, cx: &mut Context<Self>) {
-        if self
-            .bar
-            .edit
-            .as_ref()
-            .is_some_and(|edit| edit.field == field)
-        {
-            self.bar.edit = None;
-        } else {
-            self.commit_edit(cx);
-        }
-        let current = i64::from(field.get(self.automation.auto_relogin()));
-        let value = u32::try_from((current + delta).max(0)).unwrap_or(u32::MAX);
-        self.change_auto_relogin(|settings| field.set(settings, value), cx);
     }
 
     fn open_submenu(&mut self, submenu: Submenu, cx: &mut Context<Self>) {
