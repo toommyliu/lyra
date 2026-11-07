@@ -5,15 +5,17 @@
   "scripts": {
     "gen:bridge": "node scripts/gen-bridge.ts",
     "check:bridge": "node scripts/gen-bridge.ts --check",
+    "build:runtime": "node scripts/build-runtime.ts --outdir target/lyra-runtime",
     "test": "node --test scripts/*.test.ts",
-    "typecheck": "effect-tsgo tsrs --noEmit",
-    "lint": "oxlint scripts",
-    "fmt": "oxfmt scripts package.json pnpm-workspace.yaml tsconfig.json",
-    "fmt:check": "oxfmt --check scripts package.json pnpm-workspace.yaml tsconfig.json"
+    "typecheck": "effect-tsgo tsrs --noEmit && pnpm -r typecheck",
+    "lint": "oxlint scripts && pnpm -r lint",
+    "fmt": "oxfmt scripts package.json pnpm-workspace.yaml tsconfig.json && pnpm -r fmt",
+    "fmt:check": "oxfmt --check scripts package.json pnpm-workspace.yaml tsconfig.json && pnpm -r fmt:check"
   },
   "devDependencies": {
     "@effect/tsgo": "catalog:",
     "@types/node": "catalog:",
+    "esbuild": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:"
   },

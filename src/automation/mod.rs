@@ -1,6 +1,7 @@
 pub(crate) mod auth;
 pub(crate) mod bridge;
 pub(crate) mod combat;
+pub(crate) mod scripting;
 pub(crate) mod settings;
 #[cfg(test)]
 mod testing;

@@ -1,0 +1,365 @@
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex, mpsc},
+    time::{Duration, Instant},
+};
+
+use super::{Level, Limit, Limits, Outcome, Run};
+
+struct Folder(PathBuf);
+
+impl Folder {
+    fn new(files: &[(&str, &str)]) -> Self {
+        let mut random = [0; 8];
+        getrandom::getrandom(&mut random).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("lyra-script-{:x}", u64::from_ne_bytes(random)));
+        for (path, text) in files {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        Self(root)
+    }
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+struct Finished {
+    outcome: Outcome,
+    logs: Vec<String>,
+    elapsed: Duration,
+}
+
+fn run_in(folder: &Folder, entry: &str, limits: Limits, stop_after: Option<Duration>) -> Finished {
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let sink = logs.clone();
+    let (finished, outcome) = mpsc::channel();
+    let started = Instant::now();
+    let run = Run::start(
+        folder.0.join(entry),
+        limits,
+        Box::new(move |level, message| {
+            let prefix = if level == Level::Error { "error: " } else { "" };
+            sink.lock().unwrap().push(format!("{prefix}{message}"));
+        }),
+        move |outcome| {
+            let _ = finished.send(outcome);
+        },
+    )
+    .unwrap();
+    if let Some(delay) = stop_after {
+        std::thread::sleep(delay);
+        run.stop();
+    }
+    let outcome = outcome
+        .recv_timeout(Duration::from_secs(20))
+        .expect("the script finished");
+    let elapsed = started.elapsed();
+    drop(run);
+    let logs = logs.lock().unwrap().clone();
+    Finished {
+        outcome,
+        logs,
+        elapsed,
+    }
+}
+
+fn run(files: &[(&str, &str)]) -> Finished {
+    let folder = Folder::new(files);
+    run_in(&folder, files[0].0, Limits::default(), None)
+}
+
+fn failure(outcome: &Outcome) -> (&str, &str) {
+    match outcome {
+        Outcome::Failed { message, stack } => (message, stack.as_deref().unwrap_or("")),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_typescript_generator_runs_with_its_imports() {
+    let finished = run(&[
+        (
+            "main.ts",
+            r#"import { Effect } from "effect";
+import type { Name } from "./greet.ts";
+import { greet } from "./greet.ts";
+
+const name: Name = "player1";
+
+export default function* () {
+  yield* Effect.sleep("20 millis");
+  console.log(greet(name));
+}
+"#,
+        ),
+        (
+            "greet.ts",
+            "export type Name = string;\nexport const greet = (name: Name): string => `hello ${name}`;\n",
+        ),
+    ]);
+    assert_eq!(finished.outcome, Outcome::Completed);
+    assert_eq!(finished.logs, ["hello player1"]);
+}
+
+#[test]
+fn plain_javascript_modules_run_as_written() {
+    let finished = run(&[
+        (
+            "main.mjs",
+            "import { Effect } from \"effect\";\nimport { twice } from \"./util.js\";\nexport default Effect.sync(() => console.log(twice(21)));\n",
+        ),
+        ("util.js", "export const twice = (value) => value * 2;\n"),
+    ]);
+    assert_eq!(finished.outcome, Outcome::Completed);
+    assert_eq!(finished.logs, ["42"]);
+}
+
+#[test]
+fn an_import_used_only_for_its_side_effect_still_runs() {
+    let finished = run(&[
+        (
+            "main.ts",
+            "import { value } from \"./side.ts\";\nexport default function* () {}\n",
+        ),
+        (
+            "side.ts",
+            "console.log(\"side effect\");\nexport const value: number = 1;\n",
+        ),
+    ]);
+    assert_eq!(finished.outcome, Outcome::Completed);
+    assert_eq!(finished.logs, ["side effect"]);
+}
+
+#[test]
+fn a_failure_reports_the_typescript_line_that_threw() {
+    let finished = run(&[(
+        "main.ts",
+        "type Quantity = number;\nconst needed: Quantity = 10;\n\nexport default function* () {\n  throw new Error(`need ${needed}`);\n}\n",
+    )]);
+    let (message, stack) = failure(&finished.outcome);
+    assert_eq!(message, "need 10");
+    assert!(stack.contains("main.ts:5:"), "stack was {stack}");
+}
+
+#[test]
+fn a_syntax_error_names_the_file_and_position() {
+    let finished = run(&[(
+        "main.ts",
+        "export default function* () {}\nconst broken: = 1;\n",
+    )]);
+    let (message, _) = failure(&finished.outcome);
+    assert!(message.contains("main.ts:2:"), "message was {message}");
+}
+
+#[test]
+fn the_default_export_must_be_runnable() {
+    let finished = run(&[("main.js", "export default 42;\n")]);
+    let (message, _) = failure(&finished.outcome);
+    assert!(message.contains("generator function or an Effect"));
+}
+
+#[test]
+fn scripts_can_only_import_effect_and_their_own_folder() {
+    let folder = Folder::new(&[
+        ("outside.ts", "export const secret = 1;\n"),
+        ("script/inside.ts", "export const ok = 1;\n"),
+        (
+            "script/parent.ts",
+            "import \"../outside.ts\";\nexport default function* () {}\n",
+        ),
+        (
+            "script/package.ts",
+            "import \"lodash\";\nexport default function* () {}\n",
+        ),
+        (
+            "script/internal.ts",
+            "import \"internal:/lyra/prelude.js\";\nexport default function* () {}\n",
+        ),
+        (
+            "script/platform.ts",
+            "import \"effect/http\";\nexport default function* () {}\n",
+        ),
+        (
+            "script/guessed.ts",
+            "import \"./inside\";\nexport default function* () {}\n",
+        ),
+        (
+            "script/module.ts",
+            "import * as Schema from \"effect/Schema\";\nexport default function* () { console.log(typeof Schema.decodeUnknownSync); }\n",
+        ),
+    ]);
+    for entry in [
+        "script/parent.ts",
+        "script/package.ts",
+        "script/internal.ts",
+        "script/platform.ts",
+        "script/guessed.ts",
+    ] {
+        let finished = run_in(&folder, entry, Limits::default(), None);
+        assert!(
+            matches!(finished.outcome, Outcome::Failed { .. }),
+            "{entry} should fail to import, got {:?}",
+            finished.outcome
+        );
+    }
+    let finished = run_in(&folder, "script/module.ts", Limits::default(), None);
+    assert_eq!(finished.outcome, Outcome::Completed);
+    assert_eq!(finished.logs, ["function"]);
+}
+
+#[test]
+fn every_run_starts_with_fresh_globals() {
+    let folder = Folder::new(&[
+        (
+            "leak.js",
+            "globalThis.leaked = 1;\nexport default function* () {}\n",
+        ),
+        (
+            "check.js",
+            "export default function* () { if (typeof leaked !== \"undefined\") throw new Error(\"leaked\"); }\n",
+        ),
+    ]);
+    assert_eq!(
+        run_in(&folder, "leak.js", Limits::default(), None).outcome,
+        Outcome::Completed
+    );
+    assert_eq!(
+        run_in(&folder, "check.js", Limits::default(), None).outcome,
+        Outcome::Completed
+    );
+}
+
+#[test]
+fn stopping_runs_effect_finalizers() {
+    let folder = Folder::new(&[(
+        "main.ts",
+        r#"import { Effect } from "effect";
+export default function* () {
+  yield* Effect.never.pipe(Effect.ensuring(Effect.sync(() => console.log("cleaned up"))));
+}
+"#,
+    )]);
+    let finished = run_in(
+        &folder,
+        "main.ts",
+        Limits::default(),
+        Some(Duration::from_millis(200)),
+    );
+    assert_eq!(finished.outcome, Outcome::Stopped);
+    assert_eq!(finished.logs, ["cleaned up"]);
+}
+
+#[test]
+fn stopping_interrupts_a_loop_that_never_yields() {
+    for script in [
+        "export default function* () { while (true) {} }\n",
+        "while (true) {}\nexport default function* () {}\n",
+    ] {
+        let folder = Folder::new(&[("main.js", script)]);
+        let finished = run_in(
+            &folder,
+            "main.js",
+            Limits::default(),
+            Some(Duration::from_millis(200)),
+        );
+        assert_eq!(finished.outcome, Outcome::Stopped, "{script}");
+        assert!(
+            finished.elapsed < Duration::from_millis(1500),
+            "took {:?}",
+            finished.elapsed
+        );
+    }
+}
+
+#[test]
+fn a_turn_that_never_yields_is_killed_at_the_limit() {
+    let folder = Folder::new(&[(
+        "main.js",
+        "export default function* () { while (true) {} }\n",
+    )]);
+    let limits = Limits {
+        turn: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let finished = run_in(&folder, "main.js", limits, None);
+    assert_eq!(finished.outcome, Outcome::Killed(Limit::Turn));
+    assert!(finished.elapsed >= Duration::from_millis(300));
+}
+
+#[test]
+fn a_script_that_waits_is_not_a_hang() {
+    let folder = Folder::new(&[(
+        "main.ts",
+        "import { Effect } from \"effect\";\nexport default function* () { yield* Effect.sleep(\"600 millis\"); }\n",
+    )]);
+    let limits = Limits {
+        turn: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    assert_eq!(
+        run_in(&folder, "main.ts", limits, None).outcome,
+        Outcome::Completed
+    );
+}
+
+#[test]
+fn running_out_of_memory_ends_the_run() {
+    let folder = Folder::new(&[(
+        "main.js",
+        "export default function* () { const kept = []; while (true) kept.push(new Array(100000).fill(1)); }\n",
+    )]);
+    let limits = Limits {
+        memory: 32 << 20,
+        ..Limits::default()
+    };
+    assert_eq!(
+        run_in(&folder, "main.js", limits, None).outcome,
+        Outcome::Killed(Limit::Memory)
+    );
+}
+
+#[test]
+fn an_error_thrown_by_a_timer_ends_the_run() {
+    let folder = Folder::new(&[
+        (
+            "throws.ts",
+            "import { Effect } from \"effect\";\nsetTimeout(() => { throw new Error(\"timer boom\"); }, 10);\nexport default function* () { yield* Effect.never; }\n",
+        ),
+        (
+            "exhausts.js",
+            "import { Effect } from \"effect\";\nsetTimeout(() => { const kept = []; while (true) kept.push(new Array(100000).fill(1)); }, 10);\nexport default function* () { yield* Effect.never; }\n",
+        ),
+    ]);
+    let thrown = run_in(&folder, "throws.ts", Limits::default(), None);
+    assert_eq!(failure(&thrown.outcome).0, "timer boom");
+    let limits = Limits {
+        memory: 32 << 20,
+        ..Limits::default()
+    };
+    assert_eq!(
+        run_in(&folder, "exhausts.js", limits, None).outcome,
+        Outcome::Killed(Limit::Memory)
+    );
+}
+
+#[test]
+fn an_endless_promise_chain_is_killed_at_the_turn_limit() {
+    let folder = Folder::new(&[(
+        "main.js",
+        "import { Effect } from \"effect\";\nconst again = () => Promise.resolve().then(again);\nagain();\nexport default function* () { yield* Effect.never; }\n",
+    )]);
+    let limits = Limits {
+        turn: Duration::from_millis(300),
+        ..Limits::default()
+    };
+    let finished = run_in(&folder, "main.js", limits, None);
+    assert_eq!(finished.outcome, Outcome::Killed(Limit::Turn));
+    assert!(finished.elapsed < Duration::from_secs(5));
+}

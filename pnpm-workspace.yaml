@@ -1,11 +1,13 @@
 packages:
   - "packages/*"
 
-allowBuilds:
-  esbuild: set this to true or false
-
 catalog:
   "@effect/tsgo": 0.63.0
   "@types/node": 26.6.6
+  effect: 4.1.1
+  esbuild: 0.28.2
   oxfmt: 0.75.0
   oxlint: 1.90.0
+
+allowBuilds:
+  esbuild: true

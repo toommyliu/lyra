@@ -15,12 +15,14 @@ getrandom = "0.2"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a246efd7e1b83ab568ec5e3e6c1a43a42e1abba", features = ["font-kit"] }
 objc2 = "0.6"
+oxc = { version = "0.157", features = ["codegen", "semantic", "transformer"] }
 objc2-app-kit = { version = "0.3", features = ["NSView", "NSResponder", "NSGraphics"] }
 objc2-core-graphics = "0.3"
 objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "CAMetalLayer", "CATransaction"] }
 raw-window-handle = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["cookies", "native-tls", "stream"] }
+rquickjs = { version = "0.14", features = ["loader"] }
 ruffle_core = { git = "https://github.com/toommyliu/ruffle", rev = "1d8a1ea9b16592e5fc4da540109bf45503aeb8b0", features = ["aac", "audio", "default_compatibility_rules", "default_font", "lzma", "mp3", "nellymoser", "stats"] }
 ruffle_frontend_utils = { git = "https://github.com/toommyliu/ruffle", rev = "1d8a1ea9b16592e5fc4da540109bf45503aeb8b0", default-features = false, features = ["cpal", "fs"] }
 ruffle_render = { git = "https://github.com/toommyliu/ruffle", rev = "1d8a1ea9b16592e5fc4da540109bf45503aeb8b0" }
