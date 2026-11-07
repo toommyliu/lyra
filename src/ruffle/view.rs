@@ -24,6 +24,7 @@ pub enum ViewEvent {
     Text(String),
     Ime(Ime),
     Focus(bool),
+    Visible(bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -173,6 +174,7 @@ pub(crate) enum Effect {
     Event(PlayerEvent),
     Resize(Viewport),
     MouseInStage(bool),
+    Visible(bool),
 }
 
 pub(crate) fn translate(event: ViewEvent, viewport: Viewport, out: &mut Vec<Effect>) {
@@ -187,6 +189,10 @@ pub(crate) fn translate(event: ViewEvent, viewport: Viewport, out: &mut Vec<Effe
     let event = match event {
         ViewEvent::Resized(viewport) => {
             out.push(Effect::Resize(viewport));
+            return;
+        }
+        ViewEvent::Visible(visible) => {
+            out.push(Effect::Visible(visible));
             return;
         }
         ViewEvent::MouseMove(at) => {
@@ -543,6 +549,7 @@ mod tests {
                 "[Event(TextInput { codepoint: 'é' })]",
             ),
             (ViewEvent::Focus(false), "[Event(FocusLost)]"),
+            (ViewEvent::Visible(false), "[Visible(false)]"),
         ];
         for (event, expected) in cases {
             let mut effects = Vec::new();

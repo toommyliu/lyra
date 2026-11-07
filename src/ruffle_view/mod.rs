@@ -11,7 +11,7 @@ use std::ops::Range;
 
 use crate::{
     automation::{auth::auto_relogin, combat::auto_attack, settings::Store, world::auto_zone},
-    ruffle::{Output, Runtime, context_menu::MenuSelection, view::ViewEvent},
+    ruffle::{Msg, Output, Runtime, context_menu::MenuSelection, view::ViewEvent},
 };
 use gpui::{
     App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle,
@@ -69,6 +69,9 @@ impl RuffleView {
         )?;
         let inbox = session.inbox();
         native.connect_frames(move || inbox.request_frame());
+        let inbox = session.inbox();
+        native
+            .connect_visibility(move |visible| inbox.post(Msg::View(ViewEvent::Visible(visible))));
         Ok(cx.new(|cx| {
             cx.spawn(async move |this, cx| {
                 while stats.changed().await.is_ok() {

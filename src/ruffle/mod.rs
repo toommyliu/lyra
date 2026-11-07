@@ -1,6 +1,7 @@
 mod backends;
 pub(crate) mod context_menu;
 mod net;
+mod pacing;
 mod preferences;
 pub(crate) mod stats;
 mod surface;
@@ -149,9 +150,11 @@ fn run(
     attack: tokio::sync::watch::Receiver<auto_attack::Settings>,
     display_frames: bool,
 ) -> anyhow::Result<()> {
+    let mut pacing = pacing::Pacing::new(display_frames, Instant::now());
     let mut viewport = loop {
         match rx.recv()? {
             Msg::View(ViewEvent::Resized(viewport)) => break viewport,
+            Msg::View(ViewEvent::Visible(visible)) => pacing.visible = visible,
             Msg::Stop => return Ok(()),
             _ => {}
         }
@@ -224,7 +227,6 @@ fn run(
     let mut stats = stats::Collector::new(stats);
     stats.set_enabled(&mut player.lock().unwrap(), stats_enabled);
     let mut last_tick = Instant::now();
-    let mut next_render = last_tick;
     let mut frame_clock_enabled = false;
     let mut wait = Duration::ZERO;
     let mut effects = Vec::new();
@@ -249,7 +251,10 @@ fn run(
                 }
                 Some(Msg::View(event))
                     if open_menu.is_some()
-                        && !matches!(event, ViewEvent::Resized(_) | ViewEvent::Focus(_)) => {}
+                        && !matches!(
+                            event,
+                            ViewEvent::Resized(_) | ViewEvent::Focus(_) | ViewEvent::Visible(_)
+                        ) => {}
                 Some(Msg::View(event)) => {
                     view::translate(event, viewport, &mut effects);
                     let mut player = player.lock().unwrap();
@@ -276,6 +281,7 @@ fn run(
                                 viewport = next;
                             }
                             Effect::Resize(_) => {}
+                            Effect::Visible(visible) => pacing.visible = visible,
                         }
                     }
                 }
@@ -312,23 +318,16 @@ fn run(
         player.tick(FloatDuration::from_std(now - last_tick));
         last_tick = now;
         let interpolating = player.interpolating();
-        if display_frames && interpolating != frame_clock_enabled {
-            let _ = outputs.try_send(Output::FrameClock(interpolating));
-            frame_clock_enabled = interpolating;
+        let frame_clock = pacing.frame_clock(interpolating);
+        if frame_clock != frame_clock_enabled {
+            let _ = outputs.try_send(Output::FrameClock(frame_clock));
+            frame_clock_enabled = frame_clock;
         }
-        if player.needs_render()
-            && (!interpolating
-                || (display_frames && frame_due)
-                || (!display_frames && now >= next_render))
-        {
+        if pacing.draw(now, player.needs_render(), interpolating, frame_due) {
             player.render();
-            next_render = now + Duration::from_secs_f64(1.0 / 60.0);
         }
         stats.sample(&mut player, viewport.dimensions());
-        wait = player.time_til_next_frame();
-        if interpolating && !display_frames {
-            wait = wait.min(next_render.saturating_duration_since(Instant::now()));
-        }
+        wait = pacing.wait(Instant::now(), interpolating, player.time_til_next_frame());
     }
     tasks.borrow_mut().clear();
     while let Ok(message) = rx.try_recv() {

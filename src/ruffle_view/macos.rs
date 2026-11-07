@@ -5,12 +5,17 @@ use gpui::{Bounds, Pixels, Window};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
-    runtime::{NSObject, NSObjectProtocol},
+    runtime::{AnyObject, NSObject, NSObjectProtocol},
     sel,
 };
-use objc2_app_kit::{NSView, NSWindowOrderingMode};
+use objc2_app_kit::{
+    NSView, NSWindow, NSWindowDidChangeOcclusionStateNotification, NSWindowOcclusionState,
+    NSWindowOrderingMode,
+};
 use objc2_core_graphics::CGColor;
-use objc2_foundation::{NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize};
+use objc2_foundation::{
+    NSNotificationCenter, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize,
+};
 use objc2_quartz_core::{CADisplayLink, CAMetalLayer, CATransaction};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -27,21 +32,34 @@ pub(super) struct NativeView {
     input_view: Retained<NSView>,
     layer: Retained<CAMetalLayer>,
     frame_clock: Option<Retained<CADisplayLink>>,
+    occlusion_observer: Option<Retained<Callback>>,
 }
 
 define_class!(
     #[unsafe(super(NSObject))]
-    #[name = "LyraFrameClockTarget"]
+    #[name = "LyraCallback"]
     #[ivars = Box<dyn Fn()>]
-    struct FrameClockTarget;
+    struct Callback;
 
-    impl FrameClockTarget {
-        #[unsafe(method(frame:))]
-        fn frame(&self, _clock: &CADisplayLink) {
+    impl Callback {
+        #[unsafe(method(call:))]
+        fn call(&self, _sender: &AnyObject) {
             (self.ivars())();
         }
     }
 );
+
+impl Callback {
+    fn new(callback: impl Fn() + 'static) -> Retained<Callback> {
+        unsafe { msg_send![super(Callback::alloc().set_ivars(Box::new(callback))), init] }
+    }
+}
+
+fn is_visible(window: &NSWindow) -> bool {
+    window
+        .occlusionState()
+        .contains(NSWindowOcclusionState::Visible)
+}
 
 impl NativeView {
     pub(super) fn attach(window: &Window) -> Result<NativeView, Error> {
@@ -66,6 +84,7 @@ impl NativeView {
             input_view,
             layer,
             frame_clock: None,
+            occlusion_observer: None,
         })
     }
 
@@ -78,21 +97,36 @@ impl NativeView {
         if !self.supports_display_frames() {
             return;
         }
-        let target: Retained<FrameClockTarget> = unsafe {
-            msg_send![
-                super(FrameClockTarget::alloc().set_ivars(Box::new(on_frame))),
-                init
-            ]
-        };
+        let target = Callback::new(on_frame);
         let clock = unsafe {
             self.view
-                .displayLinkWithTarget_selector(&target, sel!(frame:))
+                .displayLinkWithTarget_selector(&target, sel!(call:))
         };
         clock.setPaused(true);
         unsafe {
             clock.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes);
         }
         self.frame_clock = Some(clock);
+    }
+
+    pub(super) fn connect_visibility(&mut self, on_change: impl Fn(bool) + 'static) {
+        let Some(window) = self.view.window() else {
+            return;
+        };
+        on_change(is_visible(&window));
+        let observer = Callback::new({
+            let window = window.clone();
+            move || on_change(is_visible(&window))
+        });
+        unsafe {
+            NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+                &observer,
+                sel!(call:),
+                Some(NSWindowDidChangeOcclusionStateNotification),
+                Some(&window),
+            );
+        }
+        self.occlusion_observer = Some(observer);
     }
 
     pub(super) fn set_frame_clock(&self, enabled: bool) {
@@ -132,6 +166,9 @@ impl Drop for NativeView {
     fn drop(&mut self) {
         if let Some(clock) = &self.frame_clock {
             clock.invalidate();
+        }
+        if let Some(observer) = &self.occlusion_observer {
+            unsafe { NSNotificationCenter::defaultCenter().removeObserver(observer) };
         }
         self.view.removeFromSuperview();
     }
