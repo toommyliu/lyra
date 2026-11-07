@@ -1,0 +1,21 @@
+{
+  "name": "lyra",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen:bridge": "node scripts/gen-bridge.ts",
+    "check:bridge": "node scripts/gen-bridge.ts --check",
+    "test": "node --test scripts/*.test.ts",
+    "typecheck": "effect-tsgo tsrs --noEmit",
+    "lint": "oxlint scripts",
+    "fmt": "oxfmt scripts package.json pnpm-workspace.yaml tsconfig.json",
+    "fmt:check": "oxfmt --check scripts package.json pnpm-workspace.yaml tsconfig.json"
+  },
+  "devDependencies": {
+    "@effect/tsgo": "catalog:",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:"
+  },
+  "packageManager": "pnpm@11.1.1"
+}

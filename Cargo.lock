@@ -3816,6 +3816,7 @@ dependencies = [
  "ruffle_frontend_utils",
  "ruffle_render",
  "ruffle_render_wgpu",
+ "swf 0.3.0 (git+https://github.com/toommyliu/ruffle?rev=1d8a1ea9b16592e5fc4da540109bf45503aeb8b0)",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

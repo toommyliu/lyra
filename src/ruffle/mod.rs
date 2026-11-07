@@ -1,5 +1,4 @@
 mod backends;
-mod bridge;
 pub(crate) mod context_menu;
 mod net;
 mod preferences;
@@ -23,6 +22,7 @@ use ruffle_core::{
 };
 use ruffle_frontend_utils::backends::storage::DiskStorageBackend;
 
+use crate::automation::bridge::Bridge;
 use backends::{Navigator, Tasks, Ui};
 use context_menu::{ContextMenu, MenuSelection, OpenMenu, PlayerInput};
 pub(crate) use surface::Surface;
@@ -156,7 +156,7 @@ fn run(
         None,
         None,
     )?;
-    let bridge = bridge::Bridge::default();
+    let bridge = Bridge::default();
     let player = PlayerBuilder::new()
         .with_boxed_renderer(surface.renderer(viewport)?)
         .with_navigator(Navigator::new(net, inbox.clone(), tasks.clone()))
@@ -171,6 +171,7 @@ fn run(
         .with_letterbox(Letterbox::On)
         .with_movie(movie)
         .build();
+    bridge.attach(&player);
     let smooth_motion = preferences::BoolPreference::new(data.join("smooth-motion"));
     match smooth_motion.load() {
         Ok(enabled) => player.lock().unwrap().set_frame_interpolation(enabled),

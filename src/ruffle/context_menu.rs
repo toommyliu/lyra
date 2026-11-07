@@ -3,7 +3,8 @@ use ruffle_core::{
     events::{KeyDescriptor, MouseButton},
 };
 
-use super::{bridge::Bridge, view::Point};
+use super::view::Point;
+use crate::automation::bridge::Bridge;
 
 pub(crate) struct ContextMenu {
     pub(crate) items: Vec<ContextMenuItem>,

@@ -105,6 +105,7 @@ public class World
 
 
     [BridgeExport]
+    [BridgeRustType("gameAction: GameAction")]
     public static function isActionAvailable(gameAction:String):Boolean
     {
       var game:Object = Main.Game;

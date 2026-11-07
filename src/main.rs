@@ -1,6 +1,7 @@
 #[cfg(not(target_os = "macos"))]
 compile_error!("Lyra supports macOS only.");
 
+mod automation;
 mod logging;
 mod net;
 mod ruffle;
