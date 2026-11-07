@@ -22,8 +22,10 @@ use ruffle_core::{
 };
 use ruffle_frontend_utils::backends::storage::DiskStorageBackend;
 
-use crate::automation::bridge::Bridge;
-use backends::{Navigator, Tasks, Ui};
+use crate::automation::{
+    auth::auto_relogin, bridge::Bridge, combat::auto_attack, world::auto_zone,
+};
+use backends::{Navigator, Tasks, Ui, spawn_local};
 use context_menu::{ContextMenu, MenuSelection, OpenMenu, PlayerInput};
 pub(crate) use surface::Surface;
 use view::{Effect, ViewEvent};
@@ -39,6 +41,7 @@ pub(crate) enum Msg {
 
 pub(crate) enum Output {
     Menu(ContextMenu),
+    AutoRelogin(auto_relogin::Report),
     FrameClock(bool),
     Cursor(MouseCursor),
 }
@@ -74,6 +77,9 @@ impl Runtime {
         failures: async_channel::Sender<String>,
         outputs: async_channel::Sender<Output>,
         stats: tokio::sync::watch::Sender<Option<stats::Report>>,
+        relogin: tokio::sync::watch::Receiver<auto_relogin::Settings>,
+        zone: tokio::sync::watch::Receiver<auto_zone::Settings>,
+        attack: tokio::sync::watch::Receiver<auto_attack::Settings>,
         display_frames: bool,
     ) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
@@ -93,6 +99,9 @@ impl Runtime {
                     outbox,
                     outputs,
                     stats,
+                    relogin,
+                    zone,
+                    attack,
                     display_frames,
                 ) {
                     tracing::error!(%error, "player failed");
@@ -135,6 +144,9 @@ fn run(
     inbox: Inbox,
     outputs: async_channel::Sender<Output>,
     stats: tokio::sync::watch::Sender<Option<stats::Report>>,
+    relogin: tokio::sync::watch::Receiver<auto_relogin::Settings>,
+    zone: tokio::sync::watch::Receiver<auto_zone::Settings>,
+    attack: tokio::sync::watch::Receiver<auto_attack::Settings>,
     display_frames: bool,
 ) -> anyhow::Result<()> {
     let mut viewport = loop {
@@ -148,6 +160,7 @@ fn run(
         .worker_threads(2)
         .enable_all()
         .build()?;
+    let _timers = runtime.enter();
     let net = net::Net::new(runtime.handle().clone(), device)?;
     let tasks = Tasks::default();
     let movie = SwfMovie::from_data(
@@ -172,6 +185,30 @@ fn run(
         .with_movie(movie)
         .build();
     bridge.attach(&player);
+    let phases = outputs.clone();
+    spawn_local(
+        &inbox,
+        &tasks,
+        auto_relogin::run(
+            bridge.clone(),
+            bridge.subscribe(auto_relogin::wants),
+            relogin,
+            move |phase| {
+                let _ = phases.try_send(Output::AutoRelogin(phase));
+            },
+        ),
+    );
+    spawn_local(
+        &inbox,
+        &tasks,
+        auto_zone::run(
+            bridge.clone(),
+            bridge.subscribe(auto_zone::wants),
+            zone,
+            auto_zone::random_point,
+        ),
+    );
+    spawn_local(&inbox, &tasks, auto_attack::run(bridge.clone(), attack));
     let smooth_motion = preferences::BoolPreference::new(data.join("smooth-motion"));
     match smooth_motion.load() {
         Ok(enabled) => player.lock().unwrap().set_frame_interpolation(enabled),

@@ -17,6 +17,20 @@ use crate::ruffle::{Inbox, Msg};
 
 pub(crate) type Tasks = Rc<RefCell<Vec<async_task::Task<()>>>>;
 
+pub(crate) fn spawn_local(
+    inbox: &Inbox,
+    tasks: &Tasks,
+    future: impl Future<Output = ()> + 'static,
+) {
+    let inbox = inbox.clone();
+    let (runnable, task) =
+        async_task::spawn_local(future, move |runnable| inbox.post(Msg::Poll(runnable)));
+    let mut tasks = tasks.borrow_mut();
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task);
+    runnable.schedule();
+}
+
 pub(crate) struct Navigator {
     net: Net,
     inbox: Inbox,
@@ -89,19 +103,11 @@ impl NavigatorBackend for Navigator {
     }
 
     fn spawn_future(&mut self, future: OwnedFuture<(), Error>) {
-        let inbox = self.inbox.clone();
-        let (runnable, task) = async_task::spawn_local(
-            async move {
-                if let Err(error) = future.await {
-                    tracing::error!(%error, "player task failed");
-                }
-            },
-            move |runnable| inbox.post(Msg::Poll(runnable)),
-        );
-        let mut tasks = self.tasks.borrow_mut();
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(task);
-        runnable.schedule();
+        spawn_local(&self.inbox, &self.tasks, async move {
+            if let Err(error) = future.await {
+                tracing::error!(%error, "player task failed");
+            }
+        });
     }
 
     fn pre_process_url(&self, url: Url) -> Url {

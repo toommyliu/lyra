@@ -1,3 +1,4 @@
+mod automation_panel;
 mod input;
 mod menu;
 mod stats;
@@ -8,7 +9,10 @@ mod native;
 
 use std::ops::Range;
 
-use crate::ruffle::{Output, Runtime, view::ViewEvent};
+use crate::{
+    automation::{auth::auto_relogin, combat::auto_attack, settings::Store, world::auto_zone},
+    ruffle::{Output, Runtime, context_menu::MenuSelection, view::ViewEvent},
+};
 use gpui::{
     App, AppContext as _, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle,
     Focusable, Hitbox, HitboxBehavior, InteractiveElement as _, IntoElement, KeyDownEvent,
@@ -24,6 +28,7 @@ pub struct RuffleView {
     error: Option<String>,
     stats: Option<crate::ruffle::stats::Report>,
     stats_placement: stats::Placement,
+    automation_placement: automation_panel::Placement,
     native: NativeView,
     focus: FocusHandle,
     hovered: bool,
@@ -31,6 +36,10 @@ pub struct RuffleView {
     cursor: MouseCursor,
     marked: Option<Range<usize>>,
     modifiers: gpui::Modifiers,
+    automation: Store,
+    auto_relogin: auto_relogin::Phase,
+    servers: Vec<String>,
+    automation_open: bool,
     _subscriptions: [Subscription; 3],
 }
 
@@ -45,6 +54,7 @@ impl RuffleView {
         let (failed, failures) = async_channel::bounded(1);
         let (outputs_tx, outputs) = async_channel::unbounded();
         let (stats_tx, mut stats) = tokio::sync::watch::channel(None);
+        let automation = Store::open(data.join("automation.json"));
         let session = Runtime::spawn(
             native.surface(),
             data,
@@ -52,6 +62,9 @@ impl RuffleView {
             failed,
             outputs_tx,
             stats_tx,
+            automation.watch_auto_relogin(),
+            automation.watch_auto_zone(),
+            automation.watch_auto_attack(),
             native.supports_display_frames(),
         )?;
         let inbox = session.inbox();
@@ -87,6 +100,25 @@ impl RuffleView {
                             }
                             continue;
                         }
+                        Output::AutoRelogin(report) => {
+                            if this
+                                .update(cx, |this: &mut Self, cx| {
+                                    match report {
+                                        auto_relogin::Report::Phase(phase) => {
+                                            this.auto_relogin = phase
+                                        }
+                                        auto_relogin::Report::Servers(servers) => {
+                                            this.servers = servers
+                                        }
+                                    }
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                         Output::Cursor(cursor) => {
                             if this
                                 .update(cx, |this: &mut Self, cx| {
@@ -109,7 +141,11 @@ impl RuffleView {
                     let selection = menu::show(&view, menu);
                     menu::sync_modifiers(&input_view);
                     if this
-                        .update_in(cx, |this, window, _| {
+                        .update_in(cx, |this, window, cx| {
+                            if matches!(selection, Some(MenuSelection::Automation)) {
+                                this.automation_open = true;
+                                cx.notify();
+                            }
                             this.session.close_menu(selection);
                             this.modifiers =
                                 if window.is_window_active() && this.focus.is_focused(window) {
@@ -161,6 +197,7 @@ impl RuffleView {
                 error: None,
                 stats: None,
                 stats_placement: stats::Placement::default(),
+                automation_placement: automation_panel::Placement::default(),
                 native,
                 focus,
                 hovered: false,
@@ -168,6 +205,10 @@ impl RuffleView {
                 cursor: MouseCursor::Arrow,
                 marked: None,
                 modifiers: Default::default(),
+                automation,
+                auto_relogin: auto_relogin::Phase::Off,
+                servers: Vec::new(),
+                automation_open: false,
                 _subscriptions: subscriptions,
             }
         }))
@@ -181,7 +222,55 @@ impl RuffleView {
         }
     }
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn close_automation(&mut self, cx: &mut Context<Self>) {
+        self.automation_open = false;
+        cx.notify();
+    }
+
+    fn change_auto_relogin(
+        &mut self,
+        change: impl FnOnce(&mut auto_relogin::Settings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = self.automation.auto_relogin().clone();
+        change(&mut settings);
+        if let Err(error) = self.automation.set_auto_relogin(settings) {
+            tracing::error!(%error, "couldn't save automation settings");
+        }
+        cx.notify();
+    }
+
+    fn change_auto_zone(
+        &mut self,
+        change: impl FnOnce(&mut auto_zone::Settings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = self.automation.auto_zone();
+        change(&mut settings);
+        if let Err(error) = self.automation.set_auto_zone(settings) {
+            tracing::error!(%error, "couldn't save automation settings");
+        }
+        cx.notify();
+    }
+
+    fn change_auto_attack(
+        &mut self,
+        change: impl FnOnce(&mut auto_attack::Settings),
+        cx: &mut Context<Self>,
+    ) {
+        let mut settings = self.automation.auto_attack();
+        change(&mut settings);
+        if let Err(error) = self.automation.set_auto_attack(settings) {
+            tracing::error!(%error, "couldn't save automation settings");
+        }
+        cx.notify();
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.automation_open && event.keystroke.key == "escape" {
+            self.close_automation(cx);
+            return;
+        }
         if let Some(key) = input::key(&event.keystroke) {
             self.session.send(ViewEvent::KeyDown(key));
         }
@@ -303,6 +392,18 @@ impl Render for RuffleView {
                 })
                 .size_full(),
             )
+            .when(self.automation_open, |view| {
+                view.child(automation_panel::panel(
+                    self.automation.auto_relogin(),
+                    &self.auto_relogin,
+                    &self.servers,
+                    self.automation.auto_zone(),
+                    self.automation.auto_attack(),
+                    &self.automation_placement,
+                    window,
+                    cx,
+                ))
+            })
             .when_some(self.stats, |view, stats| {
                 view.child(stats::overlay(
                     stats,

@@ -18,6 +18,7 @@ pub(crate) enum MenuSelection {
     Ruffle(usize),
     SmoothMotion,
     Stats,
+    Automation,
 }
 
 pub(super) struct OpenMenu {
