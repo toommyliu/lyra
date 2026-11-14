@@ -118,8 +118,6 @@ pub struct Client {
 
 struct Session {
     number: usize,
-    label: Option<SharedString>,
-    account: Option<AccountId>,
     view: Entity<RuffleView>,
     player: Inbox,
     _changes: Subscription,
@@ -137,10 +135,10 @@ pub(super) struct Tab {
 
 impl Session {
     fn title(&self, cx: &App) -> SharedString {
-        self.label
-            .clone()
-            .or_else(|| Some(self.view.read(cx).character()?.to_owned().into()))
-            .unwrap_or_else(|| "New tab".into())
+        let view = self.view.read(cx);
+        view.account_name()
+            .or_else(|| view.character())
+            .map_or_else(|| "New tab".into(), |title| title.to_owned().into())
     }
 }
 
@@ -257,8 +255,6 @@ impl Client {
         self.numbered += 1;
         self.sessions.push(Session {
             number: self.numbered,
-            label: account.map(|account| account.name.clone().into()),
-            account: account.map(Account::id),
             view: view.clone(),
             player,
             _changes: cx.subscribe(&view, |_, _, _: &Changed, cx| cx.notify()),
@@ -278,12 +274,9 @@ impl Client {
 
     fn link(&mut self, view: &Entity<RuffleView>, username: &str, cx: &mut Context<Self>) {
         let id = AccountId::of(username);
-        if self.session_of(&id).is_some() {
+        if self.session_of(&id, cx).is_some() {
             return;
         }
-        let Some(session) = self.sessions.iter_mut().find(|s| &s.view == view) else {
-            return;
-        };
         let accounts = match Accounts::open(self.accounts.clone()) {
             Ok(accounts) => accounts,
             Err(error) => {
@@ -294,19 +287,17 @@ impl Client {
         let Some(account) = accounts.get(&id) else {
             return;
         };
-        session.label = Some(account.name.clone().into());
-        session.account = Some(id);
         view.update(cx, |view, cx| view.adopt(account, cx));
     }
 
-    fn session_of(&self, account: &AccountId) -> Option<usize> {
+    fn session_of(&self, account: &AccountId, cx: &App) -> Option<usize> {
         self.sessions
             .iter()
-            .position(|session| session.account.as_ref() == Some(account))
+            .position(|session| session.view.read(cx).account_id().as_ref() == Some(account))
     }
 
     pub(crate) fn summary(&self, account: &AccountId, cx: &App) -> Option<Summary> {
-        let index = self.session_of(account)?;
+        let index = self.session_of(account, cx)?;
         Some(self.sessions[index].view.read(cx).summary())
     }
 
@@ -316,7 +307,7 @@ impl Client {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        match self.session_of(&account.id()) {
+        match self.session_of(&account.id(), cx) {
             Some(index) => {
                 self.sessions[index]
                     .view
@@ -335,7 +326,7 @@ impl Client {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        match self.session_of(&account.id()) {
+        match self.session_of(&account.id(), cx) {
             Some(index) => {
                 let launch = script_inputs::launch(script, cx);
                 self.sessions[index].view.update(cx, |view, cx| {
@@ -364,7 +355,7 @@ impl Client {
     }
 
     pub(crate) fn stop_script(&mut self, account: &AccountId, cx: &mut Context<Self>) {
-        if let Some(index) = self.session_of(account) {
+        if let Some(index) = self.session_of(account, cx) {
             self.sessions[index]
                 .view
                 .update(cx, |view, cx| view.cancel_script(cx));
@@ -449,7 +440,7 @@ impl Client {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.session_of(account) {
+        if let Some(index) = self.session_of(account, cx) {
             self.select(index, window, cx);
             window.activate_window();
         }
@@ -461,7 +452,7 @@ impl Client {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(index) = self.session_of(account) {
+        if let Some(index) = self.session_of(account, cx) {
             self.close_session(index, window, cx);
         }
     }
