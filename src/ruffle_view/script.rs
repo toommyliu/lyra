@@ -206,7 +206,13 @@ impl RuffleView {
     }
 
     fn script_ended(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
-        let close_tab = outcome == Outcome::Exited { close_tab: true };
+        let close_tab = matches!(
+            outcome,
+            Outcome::Exited {
+                close_tab: true,
+                ..
+            }
+        );
         if let Some(loaded) = &mut self.script.loaded {
             loaded.phase = Phase::Finished(outcome);
         }

@@ -641,7 +641,13 @@ export default function* () {
 }
 "#,
     )]);
-    assert_eq!(finished.outcome, Outcome::Exited { close_tab: false });
+    assert_eq!(
+        finished.outcome,
+        Outcome::Exited {
+            logout: false,
+            close_tab: false
+        }
+    );
     assert_eq!(finished.logs, ["cleanup, aborted true"]);
 }
 
@@ -668,7 +674,13 @@ export default function* () {
         player.answering(|_, _| Some(Ok(json!(true)))),
     )
     .finish();
-    assert_eq!(finished.outcome, Outcome::Exited { close_tab: true });
+    assert_eq!(
+        finished.outcome,
+        Outcome::Exited {
+            logout: true,
+            close_tab: true
+        }
+    );
     assert!(
         finished.elapsed >= Duration::from_secs(1),
         "{:?}",
@@ -683,6 +695,34 @@ export default function* () {
         })
         .collect();
     assert_eq!(requests, [A::LoggedIn, A::Logout].map(Request::Auth));
+}
+
+#[test]
+fn exiting_reports_a_logout_apart_from_closing_the_tab() {
+    let folder = Folder::new(&[(
+        "main.ts",
+        r#"import { Script } from "mira";
+
+export default function* () {
+  yield* Script.exit({ logout: true });
+}
+"#,
+    )]);
+    let player = FakePlayer::default();
+    let finished = start(
+        &folder,
+        "main.ts",
+        Limits::default(),
+        player.answering(|_, _| Some(Ok(json!(null)))),
+    )
+    .finish();
+    assert_eq!(
+        finished.outcome,
+        Outcome::Exited {
+            logout: true,
+            close_tab: false
+        }
+    );
 }
 
 #[test]
@@ -715,7 +755,10 @@ export default function* () {{
         .finish();
         assert_eq!(
             finished.outcome,
-            Outcome::Exited { close_tab: true },
+            Outcome::Exited {
+                logout: true,
+                close_tab: true
+            },
             "{resumed}"
         );
         assert!(
