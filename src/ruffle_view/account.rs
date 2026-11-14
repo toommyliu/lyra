@@ -1,3 +1,8 @@
+use std::{
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
 use gpui::{Context, EventEmitter, SharedString};
 use mira_ui::Tone;
 
@@ -5,7 +10,7 @@ use super::{Loading, RuffleView};
 use crate::{
     accounts::{Account, AccountId},
     automation::sign_in::Status,
-    scripting::Launch,
+    scripting::Values,
 };
 
 pub(crate) struct Changed;
@@ -19,15 +24,13 @@ impl EventEmitter<Identified> for RuffleView {}
 pub(super) struct Link {
     name: String,
     username: String,
-    queued: Option<Launch>,
 }
 
 impl Link {
-    fn new(account: &Account, queued: Option<Launch>) -> Self {
+    fn new(account: &Account) -> Self {
         Self {
             name: account.name.clone(),
             username: account.username.clone(),
-            queued,
         }
     }
 
@@ -76,10 +79,14 @@ impl RuffleView {
     pub(super) fn sign_in(
         &mut self,
         account: &Account,
-        script: Option<Launch>,
+        script: Option<(PathBuf, Values)>,
         cx: &mut Context<Self>,
     ) {
-        self.account = Some(Link::new(account, script));
+        self.account = Some(Link::new(account));
+        if let Some((script, values)) = script {
+            self.queue.add(script, values);
+            self.queue.play();
+        }
         self.use_account_settings(account.id(), cx);
         self.status = None;
         self.session
@@ -88,7 +95,7 @@ impl RuffleView {
     }
 
     pub(super) fn adopt(&mut self, account: &Account, cx: &mut Context<Self>) {
-        self.account = Some(Link::new(account, None));
+        self.account = Some(Link::new(account));
         self.changed(cx);
     }
 
@@ -97,7 +104,9 @@ impl RuffleView {
         if self.account.as_ref().is_some_and(|link| link.id() == id) {
             return false;
         }
-        self.account = None;
+        if self.account.take().is_some() {
+            self.queue.pause();
+        }
         cx.emit(Identified(player.to_owned()));
         true
     }
@@ -108,36 +117,38 @@ impl RuffleView {
         self.changed(cx);
     }
 
-    pub(super) fn queue_script(&mut self, script: Launch, replace: bool, cx: &mut Context<Self>) {
-        let Some(link) = &mut self.account else {
-            return;
-        };
-        link.queued = Some(script);
+    pub(super) fn queue_script(
+        &mut self,
+        script: PathBuf,
+        values: Values,
+        replace: bool,
+        cx: &mut Context<Self>,
+    ) {
         if replace {
-            self.stop_script(cx);
+            self.queue.add_next(script, values);
+            self.skip_script(cx);
+        } else if !self.queue.waits_for(&script) {
+            self.queue.add(script, values);
         }
+        self.queue.play();
         self.run_queued(cx);
         self.changed(cx);
     }
 
-    pub(super) fn cancel_script(&mut self, cx: &mut Context<Self>) {
-        if let Some(link) = &mut self.account {
-            link.queued = None;
-        }
-        self.stop_script(cx);
-        self.changed(cx);
-    }
-
     pub(super) fn run_queued(&mut self, cx: &mut Context<Self>) {
-        let Some(link) = &mut self.account else {
-            return;
-        };
         if !matches!(self.status, Some(Status::Online(_))) || self.script.running() {
             return;
         }
-        if let Some(script) = link.queued.take() {
-            self.start_script(script, cx);
+        if let Some(launch) = self.queue.start_next(Instant::now()) {
+            self.start_script(launch, cx);
         }
+    }
+
+    fn waiting(&self) -> Option<&Path> {
+        self.queue
+            .next()
+            .filter(|_| self.queue.playing() && !self.script.running())
+            .map(|entry| entry.script.as_path())
     }
 
     pub(super) fn changed(&mut self, cx: &mut Context<Self>) {
@@ -154,10 +165,7 @@ impl RuffleView {
             (None, Some(status), _) => login_label(status),
         };
         let queued = self
-            .account
-            .as_ref()
-            .and_then(|link| link.queued.as_ref().map(|launch| launch.entry.as_path()))
-            .filter(|_| !self.script.running())
+            .waiting()
             .map(|script| format!("Waiting to run {}", file_name(script)).into());
         let state = match (&self.error, status) {
             (Some(_), _) | (None, Some(Status::Failed(_))) => State::Failed,
@@ -169,15 +177,14 @@ impl RuffleView {
             state,
             login,
             script_failed: queued.is_none() && self.script.failed(),
-            script: queued.or_else(|| self.script.status().map(Into::into)),
+            script: queued.or_else(|| self.script_status().map(Into::into)),
             running: self.script.running(),
         }
     }
 
     pub(super) fn glance(&self) -> Option<Glance> {
         let link = self.account.as_ref();
-        let queued =
-            link.and_then(|link| link.queued.as_ref().map(|launch| launch.entry.as_path()));
+        let queued = self.waiting();
         if self.error.is_some() {
             return Some(Glance::new("Couldn't start", Tone::Danger));
         }
@@ -212,7 +219,7 @@ impl RuffleView {
                 (_, _) => return Some(Glance::new("Loading", Tone::Neutral)),
             },
         };
-        let script = self.script.status();
+        let script = self.script_status();
         if let Some(name) = self.script.loaded()
             && self.script.failed()
             && queued.is_none()
@@ -233,11 +240,8 @@ impl RuffleView {
     }
 
     pub(super) fn details(&self) -> Details {
-        let link = self.account.as_ref();
         let status = self.status.as_ref();
-        let queued = link
-            .and_then(|link| link.queued.as_ref().map(|launch| launch.entry.as_path()))
-            .filter(|_| !self.script.running());
+        let queued = self.waiting();
         let server = match status {
             Some(Status::Online(server)) => server.clone().map(Into::into),
             _ => None,
@@ -280,8 +284,7 @@ impl RuffleView {
     pub(super) fn retry_sign_in(&mut self, account: &Account, cx: &mut Context<Self>) {
         let failed = self.account.is_some() && matches!(self.status, Some(Status::Failed(_)));
         if failed {
-            let queued = self.account.take().and_then(|link| link.queued);
-            self.sign_in(account, queued, cx);
+            self.sign_in(account, None, cx);
         }
     }
 }
