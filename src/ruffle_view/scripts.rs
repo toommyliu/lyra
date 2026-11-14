@@ -22,12 +22,14 @@ use mira_ui::{
 };
 
 use super::{
-    Client,
+    Client, RuffleView,
     account::file_name,
     client::Tab,
+    queue::{self, EntryId, Queue},
+    script::failure,
     script_form::{
-        Draft, FieldDraft, Queued, ROOMS, SPECIFIC_ROOM, TabState, drafts, error, room_choice,
-        room_note, starting, values,
+        Draft, FieldDraft, ROOMS, SPECIFIC_ROOM, drafts, error, room_choice, room_note, rows,
+        starting, summary, values,
     },
 };
 use crate::{
@@ -35,7 +37,7 @@ use crate::{
     accounts::AccountId,
     script_inputs,
     scripting::{
-        self, Definition, ExtractError, Kind, Launch, SCRIPT_EXTENSIONS, Supplied, Values,
+        self, Definition, ExtractError, Kind, Launch, Outcome, SCRIPT_EXTENSIONS, Supplied, Values,
     },
     settings,
 };
@@ -330,11 +332,16 @@ pub(super) struct Picker {
     pane: Pane,
     queued: usize,
     chosen: Option<PathBuf>,
-    forms: HashMap<PathBuf, Form>,
+    forms: HashMap<FormKey, Form>,
     generation: u64,
-    loading: Option<(PathBuf, Task<()>)>,
-    tabs: HashMap<usize, TabState>,
+    loading: HashMap<FormKey, Task<()>>,
     _subscriptions: [Subscription; 3],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FormKey {
+    Script(PathBuf),
+    Entry(EntryId),
 }
 
 struct Form {
@@ -419,8 +426,7 @@ impl Picker {
             chosen: None,
             forms: HashMap::new(),
             generation: 0,
-            loading: None,
-            tabs: HashMap::new(),
+            loading: HashMap::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -586,8 +592,12 @@ impl Picker {
         if self.tab(cx).is_none_or(|tab| tab.running) || self.room_pending {
             return;
         }
-        let Some((launch, _)) = self.launch(cx) else {
+        let Some((entry, values)) = self.launch(cx) else {
             return;
+        };
+        let launch = Launch {
+            entry,
+            inputs: Supplied::Values(values),
         };
         let tab = self.tab;
         let _ = self
@@ -798,15 +808,12 @@ impl Picker {
         }
     }
 
-    fn load_form(&mut self, path: &Path, cx: &mut Context<Self>) {
+    fn load_form(&mut self, key: FormKey, path: &Path, cx: &mut Context<Self>) {
         let current = self
             .forms
-            .get(path)
+            .get(&key)
             .is_some_and(|form| form.generation == self.generation);
-        let pending = self
-            .loading
-            .as_ref()
-            .is_some_and(|(loading, _)| loading == path);
+        let pending = self.loading.contains_key(&key);
         if current || pending {
             return;
         }
@@ -824,30 +831,29 @@ impl Picker {
                 ExtractError::Inputs(message) => ("This script's inputs are invalid", message),
             })
         });
-        let path = path.to_owned();
         let generation = self.generation;
         let task = cx.spawn({
-            let path = path.clone();
+            let key = key.clone();
             async move |this, cx| {
                 let read = read.await;
                 let _ = this.update(cx, |this, cx| {
-                    this.loading = None;
-                    this.loaded(path, generation, read, cx);
+                    this.loading.remove(&key);
+                    this.loaded(key, generation, read, cx);
                     cx.notify();
                 });
             }
         });
-        self.loading = Some((path, task));
+        self.loading.insert(key, task);
     }
 
     fn loaded(
         &mut self,
-        path: PathBuf,
+        key: FormKey,
         generation: u64,
         read: Result<Option<Definition>, (&'static str, String)>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(form) = self.forms.get_mut(&path)
+        if let Some(form) = self.forms.get_mut(&key)
             && let (FormState::Fields { definition, .. }, Ok(Some(read))) = (&form.state, &read)
             && definition == read
         {
@@ -861,9 +867,12 @@ impl Picker {
             },
             Ok(None) => FormState::Plain,
             Ok(Some(definition)) => {
-                let saved = match script_inputs::saved(&path, cx) {
-                    Supplied::Values(values) => values,
-                    Supplied::StoreUnreadable => Values::new(),
+                let saved = match &key {
+                    FormKey::Script(path) => match script_inputs::saved(path, cx) {
+                        Supplied::Values(values) => values,
+                        Supplied::StoreUnreadable => Values::new(),
+                    },
+                    FormKey::Entry(id) => self.entry_values(*id, cx).unwrap_or_default(),
                 };
                 let drafts = drafts(&definition, &saved);
                 let mut texts = Vec::new();
@@ -882,13 +891,13 @@ impl Picker {
                         input.set_invalid(invalid, cx);
                         input
                     });
-                    let path = path.clone();
+                    let key = key.clone();
                     changes.push(cx.subscribe(
                         &input,
                         move |this, input, event: &InputEvent, cx| {
                             if matches!(event, InputEvent::Changed) {
                                 let text = input.read(cx).text().to_owned().into();
-                                this.set_draft(&path, index, Draft::Text(text), cx);
+                                this.set_draft(&key, index, Draft::Text(text), cx);
                             }
                         },
                     ));
@@ -902,10 +911,10 @@ impl Picker {
                 }
             }
         };
-        self.forms.insert(path, Form { generation, state });
+        self.forms.insert(key, Form { generation, state });
     }
 
-    fn set_draft(&mut self, path: &Path, index: usize, draft: Draft, cx: &mut Context<Self>) {
+    fn set_draft(&mut self, key: &FormKey, index: usize, draft: Draft, cx: &mut Context<Self>) {
         let Some(Form {
             state:
                 FormState::Fields {
@@ -915,7 +924,7 @@ impl Picker {
                     ..
                 },
             ..
-        }) = self.forms.get_mut(path)
+        }) = self.forms.get_mut(key)
         else {
             return;
         };
@@ -928,10 +937,26 @@ impl Picker {
             let invalid = error(field, slot).is_some();
             input.update(cx, |input, cx| input.set_invalid(invalid, cx));
         }
+        let edited = values(definition, drafts);
+        self.store_entry(key, edited, cx);
         cx.notify();
     }
 
-    fn reset_form(&mut self, path: &Path, cx: &mut Context<Self>) {
+    fn store_entry(&mut self, key: &FormKey, edited: Option<Values>, cx: &mut Context<Self>) {
+        if let FormKey::Entry(id) = key {
+            let id = *id;
+            self.edit_queue(cx, |queue| queue.set_values(id, edited));
+        }
+    }
+
+    fn entry_values(&self, id: EntryId, cx: &App) -> Option<Values> {
+        let view = self.view(cx)?;
+        let queue = &view.read(cx).queue;
+        let entry = queue.entries().iter().find(|entry| entry.id == id)?;
+        entry.values.clone()
+    }
+
+    fn reset_form(&mut self, key: &FormKey, cx: &mut Context<Self>) {
         let Some(Form {
             state:
                 FormState::Fields {
@@ -941,11 +966,12 @@ impl Picker {
                     ..
                 },
             ..
-        }) = self.forms.get_mut(path)
+        }) = self.forms.get_mut(key)
         else {
             return;
         };
-        for ((field, draft), input) in definition.fields().iter().zip(drafts).zip(texts) {
+        for ((field, draft), input) in definition.fields().iter().zip(drafts.iter_mut()).zip(texts)
+        {
             *draft = FieldDraft {
                 draft: starting(field),
                 stale: None,
@@ -959,11 +985,13 @@ impl Picker {
                 });
             }
         }
+        let edited = values(definition, drafts);
+        self.store_entry(key, edited, cx);
         cx.notify();
     }
 
     fn launch_values(&self, path: &Path, cx: &App) -> Option<(Option<&Definition>, Values)> {
-        match &self.forms.get(path)?.state {
+        match &self.forms.get(&FormKey::Script(path.to_owned()))?.state {
             FormState::Broken { .. } => None,
             FormState::Plain => Some((None, Values::new())),
             FormState::Fields {
@@ -977,80 +1005,82 @@ impl Picker {
         }
     }
 
-    fn launch(&mut self, cx: &mut Context<Self>) -> Option<(Launch, Queued)> {
+    fn launch(&mut self, cx: &mut Context<Self>) -> Option<(PathBuf, Values)> {
         let entry = self.target(cx)?;
         let (definition, values) = self.launch_values(&entry.path, cx)?;
-        let launch = Launch {
-            entry: entry.path.clone(),
-            inputs: Supplied::Values(values.clone()),
-        };
-        let queued = Queued::new(entry.name, launch.clone(), definition, &values);
         if definition.is_some() {
-            script_inputs::save(&entry.path, values, cx);
+            script_inputs::save(&entry.path, values.clone(), cx);
         }
-        Some((launch, queued))
+        Some((entry.path, values))
     }
 
-    fn queue(&self) -> &[Queued] {
-        self.tabs
-            .get(&self.tab)
-            .map_or(&[][..], |state| state.queue.as_slice())
+    fn view(&self, cx: &App) -> Option<Entity<RuffleView>> {
+        self.client.upgrade()?.read(cx).view_in(self.tab)
     }
 
-    fn queue_running(&self) -> bool {
-        self.tabs
-            .get(&self.tab)
-            .is_some_and(|state| state.queue_running)
+    fn entry_ready(&self, id: EntryId) -> bool {
+        match self.forms.get(&FormKey::Entry(id)).map(|form| &form.state) {
+            Some(FormState::Plain) => true,
+            Some(FormState::Fields {
+                definition, drafts, ..
+            }) => values(definition, drafts).is_some(),
+            Some(FormState::Broken { .. }) | None => false,
+        }
     }
 
-    fn tab_state(&mut self) -> &mut TabState {
-        self.tabs.entry(self.tab).or_default()
+    fn queue(&self, cx: &App) -> (Vec<queue::Entry>, bool) {
+        self.view(cx).map_or_else(Default::default, |view| {
+            let queue = &view.read(cx).queue;
+            (queue.entries().to_vec(), queue.playing())
+        })
+    }
+
+    fn queued_id(&self, index: usize, cx: &App) -> Option<EntryId> {
+        let view = self.view(cx)?;
+        let entry = view.read(cx).queue.entries().get(index)?;
+        Some(entry.id)
+    }
+
+    fn edit_queue(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Queue)) {
+        if let Some(view) = self.view(cx) {
+            view.update(cx, |view, cx| view.edit_queue(cx, edit));
+        }
+        cx.notify();
     }
 
     fn add_to_queue(&mut self, cx: &mut Context<Self>) {
-        let Some((_, queued)) = self.launch(cx) else {
+        let Some((script, values)) = self.launch(cx) else {
             return;
         };
-        self.tab_state().queue.push(queued);
-        cx.notify();
+        self.edit_queue(cx, |queue| {
+            queue.add(script, values);
+        });
     }
 
     fn move_queued(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        let running = self.queue_running();
-        let queue = &mut self.tab_state().queue;
-        if from >= queue.len() || to >= queue.len() || (running && (from == 0 || to == 0)) {
+        let Some(id) = self.queued_id(from, cx) else {
             return;
+        };
+        self.edit_queue(cx, |queue| queue.move_entry(id, to));
+        if let Some(index) = self.queue(cx).0.iter().position(|entry| entry.id == id) {
+            self.queued = index;
         }
-        let moved = queue.remove(from);
-        queue.insert(to, moved);
-        self.queued = to;
-        cx.notify();
     }
 
     fn remove_queued(&mut self, cx: &mut Context<Self>) {
-        let index = self.queued;
-        let state = self.tab_state();
-        if index >= state.queue.len() {
-            return;
+        if let Some(id) = self.queued_id(self.queued, cx) {
+            self.edit_queue(cx, |queue| queue.remove(id));
         }
-        state.queue.remove(index);
-        state.queue_running &= !state.queue.is_empty();
-        let remaining = state.queue.len();
-        self.queued = index.min(remaining.saturating_sub(1));
-        cx.notify();
     }
 
-    fn clear_queue(&mut self, cx: &mut Context<Self>) {
-        let state = self.tab_state();
-        state.queue.clear();
-        state.queue_running = false;
-        self.queued = 0;
-        cx.notify();
-    }
-
-    fn toggle_queue(&mut self, cx: &mut Context<Self>) {
-        let state = self.tab_state();
-        state.queue_running = !state.queue_running && !state.queue.is_empty();
+    fn act_on_tab(
+        &mut self,
+        cx: &mut Context<Self>,
+        act: fn(&mut RuffleView, &mut Context<RuffleView>),
+    ) {
+        if let Some(view) = self.view(cx) {
+            view.update(cx, act);
+        }
         cx.notify();
     }
 
@@ -1154,8 +1184,8 @@ impl Picker {
         .width(px(400.0))
     }
 
-    fn inputs(&self, theme: &Theme, path: &Path, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(form) = self.forms.get(path) else {
+    fn inputs(&self, theme: &Theme, key: &FormKey, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(form) = self.forms.get(key) else {
             return muted(theme, "Reading inputs…").into_any_element();
         };
         let (definition, drafts, texts) = match &form.state {
@@ -1175,7 +1205,8 @@ impl Picker {
             } => (definition, drafts, texts),
         };
         let this = cx.entity().downgrade();
-        let unreadable = script_inputs::unreadable(cx).then(|| {
+        let saved = matches!(key, FormKey::Script(_));
+        let unreadable = (saved && script_inputs::unreadable(cx)).then(|| {
             let this = this.clone();
             Alert::new(
                 "inputs-unreadable",
@@ -1194,7 +1225,7 @@ impl Picker {
         });
         let stale = drafts.iter().any(|draft| draft.stale.is_some()).then(|| {
             let this = this.clone();
-            let path = path.to_owned();
+            let key = key.clone();
             div()
                 .flex()
                 .items_center()
@@ -1202,13 +1233,17 @@ impl Picker {
                 .gap(px(12.0))
                 .child(muted(
                     theme,
-                    "Some saved values don't fit this script anymore.",
+                    if saved {
+                        "Some saved values don't fit this script anymore."
+                    } else {
+                        "Some queued values don't fit this script anymore."
+                    },
                 ))
                 .child(
                     Button::new("inputs-reset", "Reset")
                         .size(Size::Small)
                         .on_click(move |_, _, cx| {
-                            let _ = this.update(cx, |this, cx| this.reset_form(&path, cx));
+                            let _ = this.update(cx, |this, cx| this.reset_form(&key, cx));
                         }),
                 )
         });
@@ -1221,10 +1256,10 @@ impl Picker {
                 .map(|(index, (field, draft))| {
                     let set = {
                         let this = this.clone();
-                        let path = path.to_owned();
+                        let key = key.clone();
                         move |draft: Draft, cx: &mut App| {
                             let _ =
-                                this.update(cx, |this, cx| this.set_draft(&path, index, draft, cx));
+                                this.update(cx, |this, cx| this.set_draft(&key, index, draft, cx));
                         }
                     };
                     let problem = error(field, draft);
@@ -1320,7 +1355,7 @@ impl Picker {
         let Some(entry) = entry else {
             return div().into_any_element();
         };
-        let inputs = self.inputs(theme, &entry.path, cx);
+        let inputs = self.inputs(theme, &FormKey::Script(entry.path.clone()), cx);
         div()
             .flex()
             .flex_col()
@@ -1338,40 +1373,56 @@ impl Picker {
             .into_any_element()
     }
 
-    fn queued_detail(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let queue = self.queue();
+    fn queued_detail(
+        &self,
+        theme: &Theme,
+        queue: &[queue::Entry],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let Some(queued) = queue.get(self.queued) else {
             return div().into_any_element();
         };
-        let index = self.queued;
-        let running = self.queue_running();
-        let current = running && index == 0;
-        let position: SharedString = if current {
-            "Running now".into()
-        } else {
-            format!("{} of {}", index + 1, queue.len()).into()
+        let position: SharedString = match &queued.state {
+            queue::State::Waiting => format!(
+                "{} of {} waiting",
+                queue[..self.queued]
+                    .iter()
+                    .filter(|entry| entry.waiting())
+                    .count()
+                    + 1,
+                queue.iter().filter(|entry| entry.waiting()).count()
+            )
+            .into(),
+            queue::State::Running { .. } => "Running now".into(),
+            queue::State::Ended { outcome, took } => {
+                format!("{} after {}", ended(outcome), duration(*took)).into()
+            }
         };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(14.0))
-            .child(heading(
-                theme,
-                queued.name.clone(),
-                position,
-                Button::new("queued-remove", "Remove")
-                    .size(Size::Small)
-                    .disabled(current)
-                    .on_click(cx.listener(|this, _, _, cx| this.remove_queued(cx))),
-            ))
-            .child(if queued.rows.is_empty() {
-                muted(theme, "This script has no inputs.").into_any_element()
-            } else {
+        let failed = match &queued.state {
+            queue::State::Ended { outcome, .. } => failure(outcome),
+            _ => None,
+        };
+        let key = FormKey::Entry(queued.id);
+        let body = match self.forms.get(&key).map(|form| &form.state) {
+            _ if queued.waiting() => self.inputs(theme, &key, cx),
+            None => muted(theme, "Reading inputs…").into_any_element(),
+            Some(FormState::Broken { title, message }) => {
+                Alert::new("queued-broken", Tone::Danger, *title)
+                    .body(message.clone())
+                    .into_any_element()
+            }
+            Some(FormState::Plain) => muted(theme, "This script has no inputs.").into_any_element(),
+            Some(FormState::Fields { definition, .. }) => {
+                let rows = queued
+                    .values
+                    .as_ref()
+                    .map(|values| rows(definition, values))
+                    .unwrap_or_default();
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .children(queued.rows.iter().map(|(label, value)| {
+                    .children(rows.into_iter().map(|(label, value)| {
                         div()
                             .flex()
                             .gap(px(12.0))
@@ -1383,17 +1434,39 @@ impl Picker {
                                     .flex_none()
                                     .truncate()
                                     .text_color(theme.text_secondary)
-                                    .child(label.clone()),
+                                    .child(label),
                             )
-                            .child(div().flex_1().min_w_0().child(value.clone()))
+                            .child(div().flex_1().min_w_0().child(value))
                     }))
                     .into_any_element()
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .child(heading(
+                theme,
+                file_name(&queued.script).into(),
+                position,
+                Button::new("queued-remove", "Remove")
+                    .size(Size::Small)
+                    .disabled(queued.running())
+                    .on_click(cx.listener(|this, _, _, cx| this.remove_queued(cx))),
+            ))
+            .when_some(failed, |detail, message| {
+                detail.child(Alert::new("queued-failed", Tone::Danger, "Failed").body(message))
             })
+            .child(body)
             .into_any_element()
     }
 
-    fn queue_list(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let queue = self.queue();
+    fn queue_list(
+        &self,
+        theme: &Theme,
+        queue: &[queue::Entry],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         if queue.is_empty() {
             return div()
                 .h(PANE_HEIGHT)
@@ -1404,24 +1477,43 @@ impl Picker {
                 .child("Nothing queued. Pick a script in Library and choose Add to queue.")
                 .into_any_element();
         }
-        let running = self.queue_running();
         let items = queue
             .iter()
-            .enumerate()
-            .map(|(index, queued)| {
-                let item = ListItem::new(queued.name.clone());
-                let item = if queued.summary.is_empty() {
-                    item
-                } else {
-                    item.detail(queued.summary.clone())
+            .map(|queued| {
+                let item = ListItem::new(file_name(&queued.script));
+                let form = self
+                    .forms
+                    .get(&FormKey::Entry(queued.id))
+                    .map(|form| &form.state);
+                let summary = match form {
+                    Some(FormState::Fields { definition, .. }) => queued
+                        .values
+                        .as_ref()
+                        .map(|values| summary(definition, values))
+                        .unwrap_or_default(),
+                    _ => SharedString::default(),
                 };
-                if running && index == 0 {
-                    item.meta("Running")
-                } else {
+                let item = if summary.is_empty() {
                     item
+                } else {
+                    item.detail(summary)
+                };
+                match &queued.state {
+                    queue::State::Waiting => match form {
+                        Some(FormState::Broken { .. }) => item.meta("Can't start"),
+                        Some(FormState::Fields {
+                            definition, drafts, ..
+                        }) if values(definition, drafts).is_none() => item.meta("Needs inputs"),
+                        _ => item,
+                    },
+                    queue::State::Running { .. } => item.meta("Running"),
+                    queue::State::Ended { outcome, took } => {
+                        item.meta(format!("{} · {}", ended(outcome), duration(*took)))
+                    }
                 }
             })
             .collect();
+        let pinned = queue.iter().filter(|entry| !entry.waiting()).count();
         let this = cx.entity().downgrade();
         let that = this.clone();
         List::new("queue", "Queue", items, Some(self.queued))
@@ -1435,7 +1527,7 @@ impl Picker {
             .on_reorder(move |from, to, _, cx| {
                 let _ = that.update(cx, |this, cx| this.move_queued(from, to, cx));
             })
-            .pin_first(usize::from(running))
+            .pin_first(pinned)
             .into_any_element()
     }
 
@@ -1605,15 +1697,34 @@ impl Render for Picker {
         if self.open
             && let Some(entry) = &chosen
         {
-            self.load_form(&entry.path, cx);
+            self.load_form(FormKey::Script(entry.path.clone()), &entry.path, cx);
         }
-        self.queued = self.queued.min(self.queue().len().saturating_sub(1));
+        let (queue, playing) = self.queue(cx);
+        self.forms.retain(|key, _| match key {
+            FormKey::Script(_) => true,
+            FormKey::Entry(id) => queue.iter().any(|entry| entry.id == *id),
+        });
+        if self.pane == Pane::Queue {
+            for entry in &queue {
+                self.load_form(FormKey::Entry(entry.id), &entry.script, cx);
+            }
+        }
+        self.queued = self.queued.min(queue.len().saturating_sub(1));
         let valid = chosen
             .as_ref()
             .is_some_and(|entry| self.launch_values(&entry.path, cx).is_some());
         let running = tab.as_ref().is_some_and(|tab| tab.running);
-        let queued = self.queue().len();
-        let queue_running = self.queue_running();
+        let unfinished = queue
+            .iter()
+            .filter(|entry| !matches!(entry.state, queue::State::Ended { .. }))
+            .count();
+        let waiting = queue.iter().any(queue::Entry::waiting);
+        let startable = queue
+            .iter()
+            .filter(|entry| entry.waiting())
+            .all(|entry| self.entry_ready(entry.id));
+        let finished = queue.len() > unfinished;
+        let skippable = queue.iter().any(queue::Entry::running);
         let room_ready = !self.room_pending;
         let status: SharedString = tab
             .as_ref()
@@ -1638,10 +1749,10 @@ impl Render for Picker {
             "Show",
             vec![
                 "Library".into(),
-                if queued == 0 {
+                if unfinished == 0 {
                     "Queue".into()
                 } else {
-                    format!("Queue ({queued})").into()
+                    format!("Queue ({unfinished})").into()
                 },
             ],
             match self.pane {
@@ -1670,7 +1781,10 @@ impl Render for Picker {
                 self.library(&theme, rows, cx),
                 self.script_detail(&theme, chosen.as_ref(), tab.is_some() && valid, cx),
             ),
-            Pane::Queue => (self.queue_list(&theme, cx), self.queued_detail(&theme, cx)),
+            Pane::Queue => (
+                self.queue_list(&theme, &queue, cx),
+                self.queued_detail(&theme, &queue, cx),
+            ),
         };
         let body = div()
             .flex()
@@ -1726,18 +1840,38 @@ impl Render for Picker {
                         .child(
                             Button::new("queue-clear", "Clear queue")
                                 .variant(Variant::Ghost)
-                                .disabled(queued == 0)
-                                .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                                .disabled(queue.len() == usize::from(skippable))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.edit_queue(cx, Queue::clear);
+                                })),
+                        )
+                        .child(
+                            Button::new("queue-clear-finished", "Clear finished")
+                                .variant(Variant::Ghost)
+                                .disabled(!finished)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.edit_queue(cx, Queue::clear_finished);
+                                })),
                         ),
                 )
-                .action(if queue_running {
-                    Button::new("queue-stop", "Stop queue")
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_queue(cx)))
+                .when(playing && skippable, |dialog| {
+                    dialog.action(Button::new("queue-skip", "Skip").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.act_on_tab(cx, RuffleView::skip_script);
+                        },
+                    )))
+                })
+                .action(if playing || skippable {
+                    Button::new("queue-stop", "Stop queue").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.act_on_tab(cx, RuffleView::stop_script);
+                        },
+                    ))
                 } else {
                     Button::new("queue-start", "Start queue")
                         .variant(Variant::Primary)
-                        .disabled(tab.is_none() || queued == 0 || !room_ready)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_queue(cx)))
+                        .disabled(tab.is_none() || !waiting || !startable || !room_ready)
+                        .on_click(cx.listener(|this, _, _, cx| this.edit_queue(cx, Queue::play)))
                 }),
         };
         dialog.on_close(move |window, cx| close(&(), window, cx))
@@ -1979,5 +2113,23 @@ mod tests {
         assert_eq!(names_in("", Scope::Source(0)), ["daily.ts", "dage.ts"]);
         assert_eq!(names_in("daily", Scope::Source(0)), ["daily.ts"]);
         assert!(names_in("hunt", Scope::Source(1)).is_empty());
+    }
+}
+
+fn ended(outcome: &Outcome) -> &'static str {
+    match outcome {
+        Outcome::Completed => "Finished",
+        Outcome::Failed { .. } | Outcome::Killed(_) => "Failed",
+        Outcome::Stopped => "Stopped",
+        Outcome::Exited { .. } => "Exited",
+    }
+}
+
+fn duration(took: std::time::Duration) -> String {
+    let seconds = took.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m", seconds / 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
     }
 }

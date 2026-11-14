@@ -1197,16 +1197,31 @@ fn grid(cells: impl IntoIterator<Item = gpui::AnyElement>) -> Div {
 
 fn script_panel(theme: &Theme, view: &RuffleView, cx: &mut Context<RuffleView>) -> Stateful<Div> {
     let panel = ui::panel(theme, "script-panel", px(264.0))
-        .when_some(view.script.status(), |panel, text| {
+        .when_some(view.script_status(), |panel, text| {
+            panel.child(div().pt(px(6.0)).child(ui::status(theme, text)))
+        })
+        .when_some(view.queue_waiting(), |panel, text| {
             panel.child(div().pt(px(6.0)).child(ui::status(theme, text)))
         });
     let panel = if view.script.running() {
-        panel.child(
-            ui::pressable(theme, ui::row(theme, "script-stop"))
-                .role(Role::MenuItem)
-                .child("Stop")
-                .on_click(cx.listener(|this, _, _, cx| this.stop_script(cx))),
-        )
+        panel
+            .when(
+                view.queue.playing() && view.queue.running().is_some(),
+                |panel| {
+                    panel.child(
+                        ui::pressable(theme, ui::row(theme, "script-skip"))
+                            .role(Role::MenuItem)
+                            .child("Skip")
+                            .on_click(cx.listener(|this, _, _, cx| this.skip_script(cx))),
+                    )
+                },
+            )
+            .child(
+                ui::pressable(theme, ui::row(theme, "script-stop"))
+                    .role(Role::MenuItem)
+                    .child("Stop")
+                    .on_click(cx.listener(|this, _, _, cx| this.stop_script(cx))),
+            )
     } else {
         panel.when_some(view.script.loaded(), |panel, name| {
             panel.child(

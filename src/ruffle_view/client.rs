@@ -328,10 +328,10 @@ impl Client {
     ) -> anyhow::Result<()> {
         match self.session_of(&account.id(), cx) {
             Some(index) => {
-                let launch = script_inputs::launch(script, cx);
+                let values = script_inputs::values(&script, cx)?;
                 self.sessions[index].view.update(cx, |view, cx| {
                     view.retry_sign_in(account, cx);
-                    view.queue_script(launch, replace, cx);
+                    view.queue_script(script, values, replace, cx);
                 });
                 Ok(())
             }
@@ -346,19 +346,27 @@ impl Client {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        let launch = script.map(|script| script_inputs::launch(script, cx));
+        let queued = script.map(|script| {
+            let values = script_inputs::values(&script, cx);
+            values.map(|values| (script, values))
+        });
         let view = self
             .open_session(Some(account), window, cx)
             .with_context(|| format!("couldn't open {}", account.name))?;
-        view.update(cx, |view, cx| view.sign_in(account, launch, cx));
-        Ok(())
+        let (queued, unqueued) = match queued {
+            Some(Ok(queued)) => (Some(queued), None),
+            Some(Err(error)) => (None, Some(error)),
+            None => (None, None),
+        };
+        view.update(cx, |view, cx| view.sign_in(account, queued, cx));
+        unqueued.map_or(Ok(()), Err)
     }
 
     pub(crate) fn stop_script(&mut self, account: &AccountId, cx: &mut Context<Self>) {
         if let Some(index) = self.session_of(account, cx) {
             self.sessions[index]
                 .view
-                .update(cx, |view, cx| view.cancel_script(cx));
+                .update(cx, |view, cx| view.stop_script(cx));
         }
     }
 
@@ -390,7 +398,7 @@ impl Client {
                 Tab {
                     number: session.number,
                     running: script.running(),
-                    status: script.status().map(Into::into),
+                    status: view.script_status().map(Into::into),
                     script: script.entry().cloned(),
                     account: view.settings_account.clone(),
                 }
@@ -420,6 +428,13 @@ impl Client {
         picker.update(cx, |picker, cx| picker.show(tab, account.as_ref(), cx));
     }
 
+    pub(super) fn view_in(&self, tab: usize) -> Option<Entity<RuffleView>> {
+        self.sessions
+            .iter()
+            .find(|session| session.number == tab)
+            .map(|session| session.view.clone())
+    }
+
     pub(super) fn start_script_in(&mut self, tab: usize, script: Launch, cx: &mut Context<Self>) {
         if let Some(session) = self.sessions.iter().find(|session| session.number == tab) {
             session
@@ -430,7 +445,7 @@ impl Client {
 
     pub(super) fn stop_script_in(&mut self, tab: usize, cx: &mut Context<Self>) {
         if let Some(session) = self.sessions.iter().find(|session| session.number == tab) {
-            session.view.update(cx, |view, cx| view.cancel_script(cx));
+            session.view.update(cx, |view, cx| view.stop_script(cx));
         }
     }
 
