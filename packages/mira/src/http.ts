@@ -59,10 +59,12 @@ type Reply =
       readonly message: string;
     };
 
-const timeoutMs = (timeout: Duration.Input | undefined): number | undefined =>
-  timeout === undefined
-    ? undefined
-    : Math.min(Math.ceil(Duration.toMillis(timeout)), Number.MAX_SAFE_INTEGER);
+const timeoutMs = (timeout: Duration.Input | undefined): number | undefined => {
+  if (timeout === undefined) return undefined;
+  const millis = Duration.toMillis(timeout);
+  if (millis < 0) throw new Error("the timeout is negative");
+  return Math.min(Math.ceil(millis), Number.MAX_SAFE_INTEGER);
+};
 
 const send = (url: string, options: Options): object => {
   const { method, timeout } = options;
@@ -99,7 +101,16 @@ export const request = (
   url: string,
   options: Options = {},
 ): Effect.Effect<Response, RequestError> =>
-  call<Reply>(send(url, options)).pipe(
+  Effect.try({
+    try: () => send(url, options),
+    catch: (cause) =>
+      new RequestError({
+        reason: "invalidRequest",
+        url,
+        message: `couldn't send the request: ${cause instanceof Error ? cause.message : String(cause)}`,
+      }),
+  }).pipe(
+    Effect.flatMap((wire) => call<Reply>(wire)),
     Effect.flatMap((reply) => {
       if (!reply.ok) return Effect.fail(new RequestError({ ...reply, url }));
       const { ok: _, ...response } = reply;

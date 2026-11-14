@@ -1717,6 +1717,12 @@ export default function* () {
   }
   const error = yield* Http.request("https://example.com/down", { headers: { "Content-Type": "text/plain" }, body: "x" }).pipe(Effect.flip);
   console.log(`${error._tag} ${error.reason} ${error.url} ${error.message}`);
+  const cyclic: { self?: unknown } = {};
+  cyclic.self = cyclic;
+  for (const options of [{ json: 1n }, { json: cyclic }, { timeout: -1 }]) {
+    const invalid = yield* Http.request("https://example.com/invalid", options).pipe(Effect.flip);
+    console.log(`${invalid._tag} ${invalid.reason}`);
+  }
 }
 "#,
     )]);
@@ -1757,6 +1763,9 @@ export default function* () {
             "ResponseError status 404",
             "ResponseError invalidJson 200",
             "RequestError network https://example.com/down connection refused",
+            "RequestError invalidRequest",
+            "RequestError invalidRequest",
+            "RequestError invalidRequest",
         ]
     );
     let requests: Vec<Request> = player
