@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs, io, iter,
     path::{Path, PathBuf},
     rc::Rc,
@@ -911,7 +911,19 @@ impl Picker {
                 }
             }
         };
-        self.forms.insert(key, Form { generation, state });
+        let checked = match (&key, &state) {
+            (
+                FormKey::Entry(_),
+                FormState::Fields {
+                    definition, drafts, ..
+                },
+            ) => Some(values(definition, drafts)),
+            _ => None,
+        };
+        self.forms.insert(key.clone(), Form { generation, state });
+        if let Some(edited) = checked {
+            self.store_entry(&key, edited, cx);
+        }
     }
 
     fn set_draft(&mut self, key: &FormKey, index: usize, draft: Draft, cx: &mut Context<Self>) {
@@ -1700,9 +1712,17 @@ impl Render for Picker {
             self.load_form(FormKey::Script(entry.path.clone()), &entry.path, cx);
         }
         let (queue, playing) = self.queue(cx);
+        let queued: HashSet<EntryId> = self
+            .client
+            .upgrade()
+            .map(|client| client.read(cx).views())
+            .unwrap_or_default()
+            .iter()
+            .flat_map(|view| view.read(cx).queue.entries().iter().map(|entry| entry.id))
+            .collect();
         self.forms.retain(|key, _| match key {
             FormKey::Script(_) => true,
-            FormKey::Entry(id) => queue.iter().any(|entry| entry.id == *id),
+            FormKey::Entry(id) => queued.contains(id),
         });
         if self.pane == Pane::Queue {
             for entry in &queue {
